@@ -70,6 +70,14 @@ if (Select-String -Path $CMakeLists -Pattern ([regex]::Escape($cliOption)) -Quie
     $cmakeArgs += "-D$cliOption=$Cli"
 }
 
+if ([string]::IsNullOrWhiteSpace($NeoSharedRoot)) {
+    $SiblingNeoShared = Join-Path (Split-Path $RootDir -Parent) 'neoshared'
+    if (Test-Path -LiteralPath (Join-Path $SiblingNeoShared 'CMakeLists.txt')) {
+        $NeoSharedRoot = $SiblingNeoShared
+    }
+}
+
+$VcpkgOverlayPorts = $null
 if (-not [string]::IsNullOrWhiteSpace($NeoSharedRoot)) {
     if (-not [System.IO.Path]::IsPathRooted($NeoSharedRoot)) {
         $NeoSharedRoot = Join-Path $RootDir $NeoSharedRoot
@@ -79,14 +87,42 @@ if (-not [string]::IsNullOrWhiteSpace($NeoSharedRoot)) {
         throw "neoshared CMakeLists.txt not found under: $NeoSharedRoot"
     }
     $cmakeArgs += "-DNEOSHARED_ROOT=$NeoSharedRoot"
+
+    $OverlayCandidate = Join-Path $NeoSharedRoot 'vcpkg-ports'
+    if (Test-Path -LiteralPath (Join-Path $OverlayCandidate 'wxwidgets\vcpkg.json')) {
+        $VcpkgOverlayPorts = $OverlayCandidate
+    }
 }
 
-if (-not $NoVcpkg -and -not [string]::IsNullOrWhiteSpace($VcpkgRoot)) {
-    $ToolchainFile = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
-    if (Test-Path -LiteralPath $ToolchainFile) {
+if (-not $NoVcpkg) {
+    if ([string]::IsNullOrWhiteSpace($VcpkgRoot) -and
+        -not [string]::IsNullOrWhiteSpace($env:VCPKG_INSTALLATION_ROOT)) {
+        $VcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+    }
+
+    if ([string]::IsNullOrWhiteSpace($VcpkgRoot)) {
+        $SiblingVcpkg = Join-Path (Split-Path $RootDir -Parent) 'vcpkg'
+        if (Test-Path -LiteralPath (Join-Path $SiblingVcpkg 'scripts\buildsystems\vcpkg.cmake')) {
+            $VcpkgRoot = $SiblingVcpkg
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($VcpkgRoot)) {
+        if (-not [System.IO.Path]::IsPathRooted($VcpkgRoot)) {
+            $VcpkgRoot = Join-Path $RootDir $VcpkgRoot
+        }
+        $VcpkgRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($VcpkgRoot)
+        $ToolchainFile = Join-Path $VcpkgRoot 'scripts\buildsystems\vcpkg.cmake'
+        if (-not (Test-Path -LiteralPath $ToolchainFile)) {
+            throw "vcpkg toolchain file not found: $ToolchainFile"
+        }
+
         $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$ToolchainFile"
         if (-not [string]::IsNullOrWhiteSpace($VcpkgTriplet)) {
             $cmakeArgs += "-DVCPKG_TARGET_TRIPLET=$VcpkgTriplet"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($VcpkgOverlayPorts)) {
+            $cmakeArgs += "-DVCPKG_OVERLAY_PORTS=$VcpkgOverlayPorts"
         }
     }
 }

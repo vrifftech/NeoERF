@@ -26,7 +26,7 @@ env:
 
 jobs:
   linux:
-    name: Linux (GCC + wxWidgets)
+    name: Linux (GCC + system wxWidgets)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -88,7 +88,7 @@ jobs:
           retention-days: 14
 
   windows:
-    name: Windows (Visual Studio 2026 + wxWidgets)
+    name: Windows (Visual Studio 2026 + wxWidgets 3.3.3)
     runs-on: windows-2025-vs2026
     timeout-minutes: 120
     env:
@@ -116,20 +116,13 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      - name: Install wxWidgets and zlib
+      - name: Install wxWidgets 3.3.3
         shell: pwsh
         run: |
-          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT 'vcpkg.exe'
-          if (-not (Test-Path -LiteralPath $vcpkg)) {
-              throw "vcpkg was not found at $vcpkg"
-          }
-
-          & $vcpkg install `
-              wxwidgets:x64-windows-static `
-              zlib:x64-windows-static `
-              --clean-after-build
-
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\neoshared\scripts\install-wxwidgets.ps1 `
+            -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT `
+            -Triplet x64-windows-static `
+            -CleanAfterBuild
 
       - name: Configure and build
         working-directory: tool
