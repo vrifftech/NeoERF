@@ -623,7 +623,10 @@ private:
         file->Append(ID_CloseOtherTabs, "Close &Other Tabs");
         file->Append(ID_NextTab, "Next Tab\tCtrl-Tab");
         file->Append(ID_PreviousTab, "Previous Tab\tCtrl-Shift-Tab");
-        gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(*this, *file);
+        gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
+            *this, *file, [this](const std::filesystem::path& directory) {
+                chooseAndOpenArchive(directory);
+            });
         file->AppendSeparator();
         file->Append(ID_Quit, "&Quit\tCtrl+Q");
 
@@ -1266,11 +1269,15 @@ void onCopyCells(wxCommandEvent&) {
         }
     }
 
-    void onOpen(wxCommandEvent&) {
-        const auto file = wxui::chooseOpenFile(this, "Open ERF/RIM archive", kArchiveWildcard);
+    void chooseAndOpenArchive(const std::filesystem::path& initialDirectory = {}) {
+        const auto file = wxui::chooseOpenFile(this, "Open ERF/RIM archive", kArchiveWildcard, initialDirectory);
         if (file) {
             openArchive(*file);
         }
+    }
+
+    void onOpen(wxCommandEvent&) {
+        chooseAndOpenArchive();
     }
 
     void onSave(wxCommandEvent&) {
