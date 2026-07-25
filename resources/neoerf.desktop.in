@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NeoERF
+Comment=ERF/RIM archive editor
+Exec=NeoERF %f
+Icon=neoerf
+Terminal=false
+Categories=Utility;Development;
