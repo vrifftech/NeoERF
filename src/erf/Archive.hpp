@@ -6,8 +6,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace neoerf {
@@ -39,6 +41,9 @@ enum class ResourceNameProfile {
     DragonAgeOrigins,
     DragonAge2
 };
+
+std::optional<ResourceNameProfile> resource_name_profile_for_game_id(
+    std::string_view game_id) noexcept;
 
 enum class ArchiveDiskFormat {
     ErfV1,

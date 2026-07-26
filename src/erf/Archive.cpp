@@ -33,6 +33,21 @@
 #endif
 
 namespace neoerf {
+
+std::optional<ResourceNameProfile> resource_name_profile_for_game_id(
+    std::string_view game_id) noexcept {
+    if (game_id == "kotor" || game_id == "kotor2") {
+        return ResourceNameProfile::KotOR;
+    }
+    if (game_id == "jade") return ResourceNameProfile::JadeEmpire;
+    if (game_id == "nwn") return ResourceNameProfile::NeverwinterNights;
+    if (game_id == "nwn2") return ResourceNameProfile::NeverwinterNights2;
+    if (game_id == "witcher1") return ResourceNameProfile::Witcher;
+    if (game_id == "dao") return ResourceNameProfile::DragonAgeOrigins;
+    if (game_id == "da2") return ResourceNameProfile::DragonAge2;
+    return std::nullopt;
+}
+
 namespace {
 
 constexpr std::uint16_t kUnknownType = 0xFFFFu;
@@ -258,6 +273,10 @@ constexpr ResourceTypeName kWitcherResourceTypes[] = {
     {0x0811u, "ptm", true},
     {0x0812u, "ptt", true},
     {0x0813u, "lng", true},
+    // Witcher MOD archives use the BioWare-family NCS id (0x07DA). Keep
+    // 0x0814 as a readable alias for installations that contain it, but
+    // prefer 0x07DA when authoring new resources.
+    {0x07DAu, "ncs", true},
     {0x0814u, "ncs", true},
     {0x0815u, "mmd", true},
     {0x0816u, "mdb", true},
@@ -307,6 +326,8 @@ constexpr ResourceTypeName kDragonAgeResourceTypes[] = {
     {0x9006u, "erf", true},
     {0x9007u, "bic", true},
     {0x9008u, "bik", true},
+    {0x9103u, "stg", true},
+    {0x9104u, "plo", true},
     {0xFFFFu, "", true},
 };
 
@@ -358,6 +379,17 @@ constexpr ResourceTypeName kDragonAge2ResourceTypes[] = {
     {0x9109u, "mat", true},
     {0x910Au, "lst", true},
     {0x910Bu, "ncc", true},
+    {0x910Cu, "bnk", true},
+    {0x910Du, "gad", true},
+    {0x910Eu, "vlm", true},
+    {0x910Fu, "dx11", true},
+    {0x9110u, "gfx", true},
+    {0x9111u, "rml", true},
+    {0x9112u, "anb", true},
+    {0x9113u, "cre", true},
+    {0x9114u, "fxo", true},
+    {0x9115u, "ldf", true},
+    {0x9116u, "tnt", true},
     {0xFFFFu, "", true},
 };
 

@@ -124,6 +124,27 @@ if(NEOERF_BUILD_CLI)
     install(TARGETS neoerf_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(_NEOERF_TESTS_DEFAULT ON)
+else()
+    set(_NEOERF_TESTS_DEFAULT OFF)
+endif()
+option(NEOERF_BUILD_TESTS "Build NeoERF regression tests" ${_NEOERF_TESTS_DEFAULT})
+unset(_NEOERF_TESTS_DEFAULT)
+
+if(NEOERF_BUILD_TESTS)
+    enable_testing()
+    add_executable(neoerf-resource-profile-tests tests/resource_profile_tests.cpp)
+    target_link_libraries(neoerf-resource-profile-tests PRIVATE neoerf_core)
+    if(MSVC)
+        target_compile_options(neoerf-resource-profile-tests PRIVATE /W4 /permissive-)
+    else()
+        target_compile_options(neoerf-resource-profile-tests PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME neoerf-resource-profile-mapping
+             COMMAND neoerf-resource-profile-tests)
+endif()
+
 
 option(NEOERF_BUILD_WX_GUI "Build the wxWidgets desktop GUI when wxWidgets is available" ON)
 option(NEOERF_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while NEOERF_BUILD_WX_GUI is ON" OFF)

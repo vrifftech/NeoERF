@@ -342,10 +342,17 @@ public:
         rebuildRecentFilesMenu();
     }
 
-    bool openArchive(const std::filesystem::path& file, bool askBeforeDiscard = true) {
+    bool openArchive(
+        const std::filesystem::path& file,
+        bool askBeforeDiscard = true,
+        std::optional<neoerf::ResourceNameProfile> requestedProfile = std::nullopt) {
         try {
             (void)askBeforeDiscard;
             ensureDocumentTabForOpen();
+            if (requestedProfile) {
+                profile() = *requestedProfile;
+                applyResourceProfileMenu();
+            }
             archive().set_resource_type_profile(profile());
             archive().load(file);
             viewState().resetForNewDocument();
@@ -624,8 +631,10 @@ private:
         file->Append(ID_NextTab, "Next Tab\tCtrl-Tab");
         file->Append(ID_PreviousTab, "Previous Tab\tCtrl-Shift-Tab");
         gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
-            *this, *file, [this](const std::filesystem::path& directory) {
-                chooseAndOpenArchive(directory);
+            *this, *file, [this](const neogames::SavedGameDirectory& directory) {
+                chooseAndOpenArchive(
+                    directory.path,
+                    neoerf::resource_name_profile_for_game_id(directory.gameId));
             });
         file->AppendSeparator();
         file->Append(ID_Quit, "&Quit\tCtrl+Q");
@@ -1269,10 +1278,13 @@ void onCopyCells(wxCommandEvent&) {
         }
     }
 
-    void chooseAndOpenArchive(const std::filesystem::path& initialDirectory = {}) {
-        const auto file = wxui::chooseOpenFile(this, "Open ERF/RIM archive", kArchiveWildcard, initialDirectory);
+    void chooseAndOpenArchive(
+        const std::filesystem::path& initialDirectory = {},
+        std::optional<neoerf::ResourceNameProfile> requestedProfile = std::nullopt) {
+        const auto file = wxui::chooseOpenFile(
+            this, "Open ERF/RIM archive", kArchiveWildcard, initialDirectory);
         if (file) {
-            openArchive(*file);
+            openArchive(*file, true, requestedProfile);
         }
     }
 
