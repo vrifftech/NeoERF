@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/vrifftech/NeoERF/actions/workflows/ci.yml/badge.svg)](https://github.com/vrifftech/NeoERF/actions/workflows/ci.yml)
 
-C++17 ERF/RIM archive editor core, CLI, and optional wxWidgets desktop GUI.
+NeoERF is a ERF/RIM archive editor
 
 ## Build
 
@@ -67,10 +67,3 @@ New resources are emitted as `InstallN`; changed resources are emitted as `Repla
 ### DA2 stripped-name resource notes
 
 DA2 synthetic stripped resources now tolerate unknown FNV32 type hashes. Known DA2 hashes for `.lst` and `.ncc` are displayed with those extensions; any still-unknown type hash is kept in the synthetic filename as `hash_<fnv64>.#<fnv32>` and the original FNV32 value is preserved when saving.
-
-
-## Continuous integration
-
-GitHub Actions checks out `vrifftech/neoshared` beside this repository, then builds the full wxWidgets application on Ubuntu 24.04 and Windows Server 2025 with Visual Studio 2026. Successful non-pull-request runs publish staged Linux and Windows artifacts.
-
-The shared dependency defaults to `neoshared/main`. Set the repository Actions variable `NEOSHARED_REF` to a release tag or commit SHA to pin normal CI builds. A manual workflow run can override the ref, and the workflow accepts the `neoshared-updated` repository-dispatch event for cross-repository compatibility checks.
