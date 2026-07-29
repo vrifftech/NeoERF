@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/vrifftech/NeoERF/actions/workflows/ci.yml/badge.svg)](https://github.com/vrifftech/NeoERF/actions/workflows/ci.yml)
 
-C++17 ERF/RIM archive editor core, CLI, and optional wxWidgets desktop GUI.
+NeoERF is a ERF/RIM archive editor
 
 ## Build
 
