@@ -223,8 +223,10 @@ int showReplaceResourceDialog(wxWindow* parent, const std::string& resourceName,
     cancel->Bind(wxEVT_BUTTON, [&dialog](wxCommandEvent&) { dialog.EndModal(wxID_CANCEL); });
 
     dialog.SetSizerAndFit(root);
+    wxui::configureResponsiveWindow(dialog, wxSize(560, 240), wxSize(420, 200));
     wxui::applyTheme(&dialog, darkMode);
     dialog.CentreOnParent();
+    wxui::constrainWindowToDisplay(dialog);
     return dialog.ShowModal();
 }
 
@@ -752,8 +754,7 @@ private:
         root->Add(body, 1, wxEXPAND);
         panel_->SetSizer(root);
 
-        SetMinSize(FromDIP(wxSize(360, 320)));
-        SetInitialSize(FromDIP(wxSize(540, 620)));
+        wxui::configureResponsiveWindow(*this, wxSize(760, 620), wxSize(480, 360));
         settings_.restoreWindowPlacement(*this);
 
         list_->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
