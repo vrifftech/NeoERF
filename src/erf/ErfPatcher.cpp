@@ -173,6 +173,7 @@ void ensureOutputIsSafe(const std::filesystem::path& outputDirectory,
     }
     std::set<std::string> generated;
     generated.insert("changes.ini");
+    generated.insert("info.rtf");
     for (const auto& change : result.changes) {
         const std::string lower = lowerAscii(change.payloadName);
         if (!generated.insert(lower).second) {
@@ -290,7 +291,7 @@ ArchivePatcherResult diffArchivePatcher(ErfArchive& original,
     std::size_t replaceIndex = 0;
     for (const auto& change : result.changes) {
         if (change.operation == ArchivePatcherOperation::Install) {
-            result.project.add("install_folder0", "Install" + std::to_string(installIndex++), change.payloadName);
+            result.project.add("install_folder0", "File" + std::to_string(installIndex++), change.payloadName);
         } else {
             result.project.add("install_folder0", "Replace" + std::to_string(replaceIndex++), change.payloadName);
         }
@@ -330,8 +331,9 @@ void writeArchivePatcherPackage(const ArchivePatcherResult& result,
             modified.get_resource(change.resref, change.restype, output);
             written.push_back(output);
         }
-        neotsl::writeIniFile(result.project, outputDirectory / "changes.ini", true);
+        neotsl::writePackage(result.project, outputDirectory, true);
         written.push_back(outputDirectory / "changes.ini");
+        written.push_back(outputDirectory / "info.rtf");
     } catch (...) {
         if (!overwriteExisting) {
             for (const auto& path : written) {
