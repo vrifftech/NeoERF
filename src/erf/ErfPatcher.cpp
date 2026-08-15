@@ -44,11 +44,7 @@ std::string resourcePayloadName(const Resource& resource, ResourceNameProfile pr
         throw std::runtime_error("TSLPatcher cannot infer an archive resource type from unknown extension " + extension +
                                  " for resource " + resource.resref + ".");
     }
-    const std::string payload = lowerAscii(resource.resref) + "." + extension;
-    if (lowerAscii(payload) == "changes.ini") {
-        throw std::runtime_error("Resource payload collides with changes.ini: " + payload);
-    }
-    return payload;
+    return lowerAscii(resource.resref) + "." + extension;
 }
 
 void validateArchiveForPatcher(const ErfArchive& archive, const char* role) {
@@ -165,28 +161,15 @@ bool payloadsEqual(ErfArchive& original,
     return filesEqual(originalPath, modifiedPath);
 }
 
-void ensureOutputIsSafe(const std::filesystem::path& outputDirectory,
-                        const ArchivePatcherResult& result,
-                        bool overwriteExisting) {
-    if (outputDirectory.empty()) {
-        throw std::runtime_error("TSLPatcher package output directory is empty.");
-    }
+void validatePayloadNames(const ArchivePatcherResult& result,
+                          const std::filesystem::path& selectedIni) {
     std::set<std::string> generated;
-    generated.insert("changes.ini");
+    generated.insert(lowerAscii(selectedIni.filename().string()));
     generated.insert("info.rtf");
     for (const auto& change : result.changes) {
         const std::string lower = lowerAscii(change.payloadName);
         if (!generated.insert(lower).second) {
-            throw std::runtime_error("Multiple archive changes would generate the same payload filename: " +
-                                     change.payloadName);
-        }
-    }
-    if (overwriteExisting) return;
-    for (const auto& name : generated) {
-        std::error_code ec;
-        if (std::filesystem::exists(outputDirectory / name, ec) && !ec) {
-            throw std::runtime_error("Refusing to overwrite existing generated package file: " +
-                                     (outputDirectory / name).string());
+            throw std::runtime_error("Multiple package outputs would use the same filename: " + change.payloadName);
         }
     }
 }
@@ -308,14 +291,21 @@ ArchivePatcherResult diffArchivePatcher(ErfArchive& original,
     return result;
 }
 
-void writeArchivePatcherPackage(const ArchivePatcherResult& result,
-                                ErfArchive& modified,
-                                const std::filesystem::path& outputDirectory,
-                                bool allowUnsupported,
-                                bool overwriteExisting) {
+void writeArchivePatcherPackageToIni(const ArchivePatcherResult& result,
+                                     ErfArchive& modified,
+                                     const std::filesystem::path& outputIni,
+                                     bool allowUnsupported) {
     validateArchiveForPatcher(modified, "Modified");
     if (!allowUnsupported) neotsl::throwIfUnsupported(result.project);
-    ensureOutputIsSafe(outputDirectory, result, overwriteExisting);
+
+    const std::filesystem::path iniPath = outputIni.extension().empty()
+        ? std::filesystem::path(outputIni.string() + ".ini")
+        : outputIni;
+    const std::filesystem::path outputDirectory = iniPath.parent_path().empty()
+        ? std::filesystem::current_path()
+        : iniPath.parent_path();
+    validatePayloadNames(result, iniPath);
+    (void)neotsl::preflightIniMerge(result.project, iniPath, true);
 
     std::error_code ec;
     std::filesystem::create_directories(outputDirectory, ec);
@@ -324,25 +314,34 @@ void writeArchivePatcherPackage(const ArchivePatcherResult& result,
                                  ": " + ec.message());
     }
 
-    std::vector<std::filesystem::path> written;
-    try {
-        for (const auto& change : result.changes) {
-            const auto output = outputDirectory / change.payloadName;
-            modified.get_resource(change.resref, change.restype, output);
-            written.push_back(output);
-        }
-        neotsl::writePackage(result.project, outputDirectory, true);
-        written.push_back(outputDirectory / "changes.ini");
-        written.push_back(outputDirectory / "info.rtf");
-    } catch (...) {
-        if (!overwriteExisting) {
-            for (const auto& path : written) {
-                std::error_code ignored;
-                std::filesystem::remove(path, ignored);
+    TemporaryDirectory temporary;
+    for (std::size_t index = 0; index < result.changes.size(); ++index) {
+        const auto& change = result.changes[index];
+        const std::filesystem::path staged = temporary.path() / ("payload-" + std::to_string(index));
+        modified.get_resource(change.resref, change.restype, staged);
+        const std::filesystem::path target = outputDirectory / change.payloadName;
+        if (std::filesystem::exists(target, ec) && !ec) {
+            if (!filesEqual(staged, target)) {
+                throw std::runtime_error(
+                    "The package already contains a different payload named " + change.payloadName +
+                    ". NeoERF will not overwrite it while merging an installer INI.");
             }
+            continue;
         }
-        throw;
+        std::filesystem::rename(staged, target, ec);
+        if (ec) {
+            throw std::runtime_error("Unable to install archive payload " + target.string() + ": " + ec.message());
+        }
     }
+    neotsl::writePackageToIni(result.project, iniPath, true);
+}
+
+void writeArchivePatcherPackage(const ArchivePatcherResult& result,
+                                ErfArchive& modified,
+                                const std::filesystem::path& outputDirectory,
+                                bool allowUnsupported,
+                                bool) {
+    writeArchivePatcherPackageToIni(result, modified, outputDirectory / "changes.ini", allowUnsupported);
 }
 
 } // namespace neoerf

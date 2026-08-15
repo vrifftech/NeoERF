@@ -6,6 +6,7 @@
 #include "NeoGameDirectoryMenu.hpp"
 #include "NeoDocumentTabs.hpp"
 #include "NeoSettings.hpp"
+#include "NeoPatcherExport.hpp"
 #include "NeoViewState.hpp"
 #include "neoerf_icon.xpm"
 
@@ -33,6 +34,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
+              "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
 
 namespace {
 
@@ -643,7 +647,7 @@ private:
 
         auto* exportMenu = new wxMenu;
         exportMenu->Append(ID_ExportArchivePatcher,
-                           "Export TSLPatcher/HoloPatcher Resource Package...");
+                           "Export TSLPatcher/HoloPatcher Instructions...");
 
         auto* tools = new wxMenu;
         tools->Append(ID_Extract, "&Extract selected...\tCtrl+E");
@@ -1347,7 +1351,7 @@ void onCopyCells(wxCommandEvent&) {
             }
             if (archive().dirty()) {
                 throw std::runtime_error(
-                    "Save the active archive before exporting a patcher package so the modified archive on disk matches the active tab.");
+                    "Save the active archive before exporting patcher instructions so the modified archive on disk matches the active tab.");
             }
             if (profile() != neoerf::ResourceNameProfile::KotOR || archive().filename_based_resources() ||
                 archive().extended_resrefs() ||
@@ -1372,26 +1376,11 @@ void onCopyCells(wxCommandEvent&) {
                 defaultTarget);
             if (!targetPath) return;
 
-            const auto outputDirectory = chooseDirectory(
-                this, "Select the destination tslpatchdata folder");
-            if (!outputDirectory) return;
-
             neoerf::ErfArchive original;
             original.set_resource_type_profile(neoerf::ResourceNameProfile::KotOR);
             original.load(*originalPath);
             auto result = neoerf::diffArchivePatcher(original, archive(), *targetPath);
             neotsl::throwIfUnsupported(result.project);
-
-            bool outputExists = std::filesystem::exists(*outputDirectory / "changes.ini");
-            for (const auto& change : result.changes) {
-                outputExists = outputExists || std::filesystem::exists(*outputDirectory / change.payloadName);
-            }
-            if (outputExists && !wxui::confirm(
-                    this,
-                    "Replace Generated Package Files",
-                    "The selected folder already contains one or more files NeoERF will generate. Replace those files?")) {
-                return;
-            }
 
             if (!result.project.warnings.empty()) {
                 std::ostringstream warning;
@@ -1402,15 +1391,34 @@ void onCopyCells(wxCommandEvent&) {
                 if (!wxui::confirm(this, "Archive Resource Patch Warning", warning.str())) return;
             }
 
-            neoerf::writeArchivePatcherPackage(result, archive(), *outputDirectory, false, outputExists);
+            const auto output = wxui::choosePatcherOutput(this);
+            if (!output) return;
+
+            if (!output->writesToIni()) {
+                std::vector<std::string> payloadNames;
+                payloadNames.reserve(result.changes.size());
+                for (const auto& change : result.changes) payloadNames.push_back(change.payloadName);
+                wxui::showIniFragmentDialog(
+                    this,
+                    "Archive Patcher INI Fragment",
+                    result.project,
+                    payloadNames);
+                return;
+            }
+
+            const bool mergedExisting = std::filesystem::exists(output->iniPath);
+            neoerf::writeArchivePatcherPackageToIni(result, archive(), output->iniPath, false);
             setStatus("Patcher package exported.", archive().filename().filename().string(),
                       std::to_string(result.installCount()) + " added, " +
                           std::to_string(result.replacementCount()) + " replaced");
             wxui::showMessage(
                 this,
                 "Patcher Package Exported",
-                "Wrote changes.ini and " + std::to_string(result.changes.size()) +
-                    " resource payload(s) to:\n" + outputDirectory->string());
+                std::string(mergedExisting ? "Merged archive instructions into:\n"
+                                           : "Created the installer INI:\n") +
+                    neosettings::pathToUtf8(output->iniPath) + "\n\nStaged " +
+                    std::to_string(result.changes.size()) +
+                    " resource payload(s) beside the selected INI.");
         } catch (const std::exception& ex) {
             wxui::showError(this, ex);
         }

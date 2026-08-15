@@ -27,7 +27,7 @@ void usage() {
         "  neoerf_cli [--game kotor|jade|nwn|nwn2|witcher|dao|da2] extract <archive> <destination-folder> [resref.ext ...]\n"
         "  neoerf_cli [--game kotor|jade|nwn|nwn2|witcher|dao|da2] create <archive> [--type ERF|ERF2|DAO|ERF22|DAO22|ERF22U|DAO22U|ERF3|DA2|MOD|HAK|SAV|NWM|RIM|RIMP|CRF] <file ...>\n"
         "  neoerf_cli [--game kotor|jade|nwn|nwn2|witcher|dao|da2] add <archive> [--output <archive>] [--no-replace] <file ...>\n"
-        "  neoerf_cli [--game kotor] diff-tslpatcher <original-archive> <modified-archive> <output-dir> --target <game-relative-archive> [--overwrite] [--allow-unsupported]\n"
+        "  neoerf_cli [--game kotor] diff-tslpatcher <original-archive> <modified-archive> <output-dir> --target <game-relative-archive> [--ini installer.ini] [--allow-unsupported]\n"
         "  neoerf_cli [--game kotor|jade|nwn|nwn2|witcher|dao|da2] delete <archive> [--output <archive>] <resref.ext ...>\n"
         "\n"
         "Notes:\n"
@@ -351,15 +351,19 @@ void export_archive_patcher(const std::vector<std::string>& args, ResourceNamePr
     const std::filesystem::path modifiedPath = args[3];
     const std::filesystem::path outputDirectory = args[4];
     std::string targetArchivePath;
-    bool overwrite = false;
+    std::filesystem::path iniFilename = "changes.ini";
     bool allowUnsupported = false;
 
     for (std::size_t i = 5; i < args.size(); ++i) {
         if (args[i] == "--target") {
             if (i + 1 >= args.size()) throw std::runtime_error("--target requires a game-relative archive path.");
             targetArchivePath = args[++i];
+        } else if (args[i] == "--ini") {
+            if (i + 1 >= args.size()) throw std::runtime_error("--ini requires a filename.");
+            iniFilename = args[++i];
         } else if (args[i] == "--overwrite") {
-            overwrite = true;
+            // Retained as a backwards-compatible no-op. Existing INIs are merged,
+            // and conflicting payload files are never overwritten.
         } else if (args[i] == "--allow-unsupported") {
             allowUnsupported = true;
         } else if (args[i] == "--tslpatcher" || args[i] == "--holopatcher" || args[i] == "--package") {
@@ -384,8 +388,11 @@ void export_archive_patcher(const std::vector<std::string>& args, ResourceNamePr
 
     auto result = diffArchivePatcher(original, modified, targetArchivePath);
     neotsl::printReport(result.project);
-    writeArchivePatcherPackage(result, modified, outputDirectory, allowUnsupported, overwrite);
-    std::cout << "Wrote TSLPatcher/HoloPatcher archive resource package to " << outputDirectory.string() << "\n"
+    const std::filesystem::path iniPath = iniFilename.is_absolute()
+        ? iniFilename
+        : outputDirectory / iniFilename;
+    writeArchivePatcherPackageToIni(result, modified, iniPath, allowUnsupported);
+    std::cout << "Wrote TSLPatcher/HoloPatcher archive resource package through " << iniPath.string() << "\n"
               << "  Installed resources: " << result.installCount() << "\n"
               << "  Replaced resources: " << result.replacementCount() << "\n";
 }

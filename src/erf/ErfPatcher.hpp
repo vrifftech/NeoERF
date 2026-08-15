@@ -34,7 +34,7 @@ struct ArchivePatcherResult {
 
 // TSLPatcher archive destinations are game-relative Windows paths, for example
 // "Modules\\foo.mod". Absolute paths and parent traversal are deliberately
-// rejected because changes.ini is installed relative to the game root.
+// rejected because the selected installer INI is installed relative to the game root.
 std::string normalizePatcherArchiveDestination(std::string path);
 
 // Builds stock-compatible [InstallList] instructions for adding/replacing
@@ -44,10 +44,15 @@ ArchivePatcherResult diffArchivePatcher(ErfArchive& original,
                                         ErfArchive& modified,
                                         const std::string& targetArchivePath);
 
-// Writes changes.ini and extracts every changed resource from the modified
-// archive into the package folder. Existing output files are rejected unless
-// overwriteExisting is true. Unsupported changes are rejected unless
-// allowUnsupported is true.
+// Writes the selected installer INI and extracts every changed resource beside
+// it. Existing INI content is merged. Existing identical payloads are retained;
+// a different payload with the same name is rejected.
+void writeArchivePatcherPackageToIni(const ArchivePatcherResult& result,
+                                     ErfArchive& modified,
+                                     const std::filesystem::path& outputIni,
+                                     bool allowUnsupported = false);
+
+[[deprecated("Use writeArchivePatcherPackageToIni() with the exact selected installer INI path")]]
 void writeArchivePatcherPackage(const ArchivePatcherResult& result,
                                 ErfArchive& modified,
                                 const std::filesystem::path& outputDirectory,
