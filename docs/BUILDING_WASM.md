@@ -46,8 +46,7 @@ dist-wasm/
 ├── neoerf.wasm
 ├── neoerf.svg
 ├── site.webmanifest
-├── THIRD_PARTY_NOTICES.txt
-└── SHA256SUMS.txt
+└── THIRD_PARTY_NOTICES.txt
 ```
 
 Serve the directory over HTTP for local use:
@@ -70,11 +69,11 @@ supported.
   normal Open command and explicitly select required files.
 - The browser build does not launch Finder, Explorer, another NeoTool, or an
   unrestricted native process.
-- Package-aware **Write to INI** is disabled in the browser preview because the
+- Package-aware **Write to INI** is disabled in the browser build because the
   selected INI and every companion payload must be updated together. Patcher
   **Fragment** preview, clipboard copy, and download remain available.
 - Writable-directory and directory-wide operations are desktop-only. NeoERF's
-  multi-resource extraction is therefore disabled in the browser preview.
+  multi-resource extraction is therefore disabled in the browser build.
 - Large resources remain constrained by browser memory. The build permits
   memory growth up to 2 GiB but does not guarantee every browser can supply it.
 

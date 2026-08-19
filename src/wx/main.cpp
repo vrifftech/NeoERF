@@ -37,6 +37,10 @@
 
 static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
               "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
+#if defined(__EMSCRIPTEN__)
+static_assert(neobrowser::kBrowserFileApiVersion >= 1u,
+              "NeoERF WebAssembly requires the browser host-file bridge from the current neoshared checkout.");
+#endif
 
 namespace {
 
@@ -174,29 +178,11 @@ std::string tableCell(const std::vector<std::string>& row, std::size_t index) {
     return index < row.size() ? row[index] : std::string();
 }
 
-std::vector<std::filesystem::path> chooseOpenFiles(wxWindow* parent,
-                                                   const std::string& title,
-                                                   const std::string& wildcard) {
-    wxFileDialog dialog(parent, wxui::toWx(title), wxEmptyString, wxEmptyString,
-                        wxui::toWx(wildcard), wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
-    if (dialog.ShowModal() != wxID_OK) {
-        return {};
-    }
-    wxArrayString paths;
-    dialog.GetPaths(paths);
-    std::vector<std::filesystem::path> result;
-    result.reserve(paths.size());
-    for (const auto& path : paths) {
-        result.emplace_back(wxui::toStd(path));
-    }
-    return result;
-}
-
 std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent, const std::string& title) {
 #if defined(__EMSCRIPTEN__)
     (void)title;
     wxMessageBox(
-        "Multi-resource extraction to a writable directory is unavailable in the browser preview. The Extract command can download one selected existing resource at a time. Use a desktop build for multi-resource or directory-wide extraction.",
+        "Multi-resource extraction to a writable directory is unavailable in the browser build. The Extract command can download one selected existing resource at a time. Use a desktop build for multi-resource or directory-wide extraction.",
         "Extraction Unavailable",
         wxOK | wxICON_INFORMATION,
         parent);
@@ -1286,7 +1272,11 @@ void onCopyCells(wxCommandEvent&) {
             applyResourceProfileMenu();
             stagedRows().clear();
             refreshList();
+#if defined(__EMSCRIPTEN__)
+            setStatus("New archive initialized. Use Save to download it.", file->filename().string(), fileCountText());
+#else
             setStatus("File " + file->string() + " created.", file->filename().string(), fileCountText());
+#endif
             updateTitle();
         } catch (const std::exception& ex) {
             wxui::showError(this, ex);
@@ -1307,25 +1297,39 @@ void onCopyCells(wxCommandEvent&) {
         chooseAndOpenArchive();
     }
 
-    void onSave(wxCommandEvent& event) {
-#if defined(__EMSCRIPTEN__)
-        onSaveAs(event);
-        return;
-#endif
+    void onSave(wxCommandEvent&) {
         try {
             if (!archive().loaded()) {
                 throw std::runtime_error("No archive loaded.");
             }
+#if !defined(__EMSCRIPTEN__)
             if (!archive().dirty()) {
                 return;
             }
+#endif
             setProgressVisible(true, 1);
+#if defined(__EMSCRIPTEN__)
+            // Passing the current virtual path explicitly also serializes a
+            // newly created or unchanged archive before downloading it.
+            archive().save(archive().filename());
+#else
             archive().save();
+#endif
+#if defined(__EMSCRIPTEN__)
+            if (!wxui::publishBrowserFile(
+                    archive().filename(), archive().filename().filename().string())) {
+                throw std::runtime_error("The browser could not download the archive.");
+            }
+#endif
             stagedRows().clear();
             refreshList();
             rememberRecentFile(archive().filename());
             neogames::resolver().inferFromOpenedPath(archive().filename());
+#if defined(__EMSCRIPTEN__)
+            setStatus("Archive downloaded.", archive().filename().filename().string(), fileCountText());
+#else
             setStatus("Changes saved to file " + archive().filename().filename().string() + ".", archive().filename().filename().string(), fileCountText());
+#endif
             updateTitle();
             setProgressVisible(false, 0);
         } catch (const std::exception& ex) {
@@ -1339,17 +1343,30 @@ void onCopyCells(wxCommandEvent&) {
             if (!archive().loaded()) {
                 throw std::runtime_error("No archive loaded.");
             }
-            const auto file = wxui::chooseSaveFile(this, "Save archive as", kArchiveWildcard, archive().filename().filename().string());
+            const auto file = wxui::chooseSaveFile(
+                this,
+                "Save archive as",
+                kArchiveWildcard,
+                archive().filename().filename().string());
             if (!file) {
                 return;
             }
             setProgressVisible(true, 1);
             archive().save(*file);
+#if defined(__EMSCRIPTEN__)
+            if (!wxui::publishBrowserFile(*file, file->filename().string())) {
+                throw std::runtime_error("The browser could not download the archive.");
+            }
+#endif
             stagedRows().clear();
             refreshList();
             rememberRecentFile(archive().filename());
             neogames::resolver().inferFromOpenedPath(archive().filename());
+#if defined(__EMSCRIPTEN__)
+            setStatus("Archive downloaded as " + file->filename().string() + ".", file->filename().string(), fileCountText());
+#else
             setStatus("File saved as " + archive().filename().filename().string() + ".", archive().filename().filename().string(), fileCountText());
+#endif
             updateTitle();
             setProgressVisible(false, 0);
         } catch (const std::exception& ex) {
@@ -1442,7 +1459,7 @@ void onCopyCells(wxCommandEvent&) {
         if (!archive().loaded()) {
             return;
         }
-        const auto files = chooseOpenFiles(this, "Add resources", kAllFilesWildcard);
+        const auto files = wxui::chooseOpenFiles(this, "Add resources", kAllFilesWildcard);
         if (!files.empty()) {
             insertResources(files);
         }
@@ -1460,7 +1477,7 @@ void onCopyCells(wxCommandEvent&) {
 #if defined(__EMSCRIPTEN__)
             if (rows.size() != 1) {
                 throw std::runtime_error(
-                    "The browser preview can download one extracted resource at a time. Use a desktop build for directory-wide or multi-resource extraction.");
+                    "The browser build can download one extracted resource at a time. Use a desktop build for directory-wide or multi-resource extraction.");
             }
             const long data = list_->GetItemData(rows.front());
             if (data < 0 || static_cast<std::size_t>(data) >= displayRows_.size()) {
@@ -1480,7 +1497,10 @@ void onCopyCells(wxCommandEvent&) {
             } else {
                 archive().get_resource(row.resref, row.restype, *output);
             }
-            setStatus("1 resource extracted.", archive().filename().filename().string(), fileCountText());
+            if (!wxui::publishBrowserFile(*output, output->filename().string())) {
+                throw std::runtime_error("The browser could not download the extracted resource.");
+            }
+            setStatus("1 resource downloaded.", archive().filename().filename().string(), fileCountText());
             return;
 #endif
             const auto directory = chooseDirectory(this, "Select a folder to extract selected resources to:");

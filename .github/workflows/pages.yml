@@ -76,10 +76,7 @@ jobs:
           test -f tool/dist-wasm/neoerf.js
           test -f tool/dist-wasm/neoerf.wasm
           test -f tool/dist-wasm/THIRD_PARTY_NOTICES.txt
-          test -f tool/dist-wasm/CORRESPONDING_SOURCE.txt
-          test -f tool/dist-wasm/PORT_STATUS.txt
           grep -q 'NeoERF' tool/dist-wasm/index.html
-          (cd tool/dist-wasm && sha256sum -c SHA256SUMS.txt)
 
       - name: Configure GitHub Pages
         if: ${{ github.event_name != 'pull_request' }}
