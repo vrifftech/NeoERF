@@ -193,11 +193,21 @@ std::vector<std::filesystem::path> chooseOpenFiles(wxWindow* parent,
 }
 
 std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent, const std::string& title) {
+#if defined(__EMSCRIPTEN__)
+    (void)title;
+    wxMessageBox(
+        "Multi-resource extraction to a writable directory is unavailable in the browser preview. The Extract command can download one selected existing resource at a time. Use a desktop build for multi-resource or directory-wide extraction.",
+        "Extraction Unavailable",
+        wxOK | wxICON_INFORMATION,
+        parent);
+    return std::nullopt;
+#else
     wxDirDialog dialog(parent, wxui::toWx(title), wxEmptyString, wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) {
         return std::nullopt;
     }
     return std::filesystem::path(wxui::toStd(dialog.GetPath()));
+#endif
 }
 
 int showReplaceResourceDialog(wxWindow* parent, const std::string& resourceName, bool darkMode) {
@@ -1297,7 +1307,11 @@ void onCopyCells(wxCommandEvent&) {
         chooseAndOpenArchive();
     }
 
-    void onSave(wxCommandEvent&) {
+    void onSave(wxCommandEvent& event) {
+#if defined(__EMSCRIPTEN__)
+        onSaveAs(event);
+        return;
+#endif
         try {
             if (!archive().loaded()) {
                 throw std::runtime_error("No archive loaded.");
@@ -1443,6 +1457,32 @@ void onCopyCells(wxCommandEvent&) {
             if (rows.empty()) {
                 throw std::runtime_error("Select one or more resources first.");
             }
+#if defined(__EMSCRIPTEN__)
+            if (rows.size() != 1) {
+                throw std::runtime_error(
+                    "The browser preview can download one extracted resource at a time. Use a desktop build for directory-wide or multi-resource extraction.");
+            }
+            const long data = list_->GetItemData(rows.front());
+            if (data < 0 || static_cast<std::size_t>(data) >= displayRows_.size()) {
+                throw std::runtime_error("The selected resource is no longer available.");
+            }
+            const auto& row = displayRows_[static_cast<std::size_t>(data)];
+            if (row.staged) {
+                throw std::runtime_error("Save the archive before extracting a newly staged resource.");
+            }
+            const std::string outputName = neoerf::ascii_lower(row.filename());
+            const auto output = wxui::chooseSaveFile(this, "Download extracted resource", kAllFilesWildcard, outputName);
+            if (!output) {
+                return;
+            }
+            if (archive().filename_based_resources()) {
+                archive().get_resource_by_name(row.filename(), *output);
+            } else {
+                archive().get_resource(row.resref, row.restype, *output);
+            }
+            setStatus("1 resource extracted.", archive().filename().filename().string(), fileCountText());
+            return;
+#endif
             const auto directory = chooseDirectory(this, "Select a folder to extract selected resources to:");
             if (!directory) {
                 return;

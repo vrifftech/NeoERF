@@ -33,6 +33,7 @@ endif()
 
 include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
 include("${NEOSHARED_ROOT}/cmake/NeoMacOSBundle.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoWasm.cmake")
 neo_read_version_header(NEOERF_VERSION
     "${CMAKE_CURRENT_LIST_DIR}/src/core/Version.hpp"
     NEOERF_VERSION_STRING)
@@ -231,6 +232,11 @@ if(NEOERF_BUILD_WX_GUI)
             NAME "NeoERF"
             IDENTIFIER "com.vrifftech.neoerf"
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.icns"
+        )
+        neo_configure_wasm_target(NeoERF
+            NAME "NeoERF"
+            SLUG "neoerf"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.svg"
         )
         target_link_libraries(NeoERF PRIVATE neoerf_core neoerf_patcher)
         target_include_directories(NeoERF PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
