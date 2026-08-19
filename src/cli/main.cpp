@@ -1,7 +1,7 @@
 #include "erf/Archive.hpp"
 #include "erf/ErfPatcher.hpp"
 #include "erf/Utils.hpp"
-#include "erf/Version.hpp"
+#include "core/Version.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -18,7 +18,7 @@ namespace {
 
 void usage() {
     std::cout <<
-        std::string("NeoERF ") + kNeoErfVersion + " command line\n"
+        std::string("NeoERF ") + kVersion + " command line\n"
         "\n"
         "Usage:\n"
         "  neoerf_cli [--game kotor|jade|nwn|nwn2|witcher|dao|da2] valid <archive>\n"
@@ -445,7 +445,7 @@ int main(int argc, char** argv) {
             return args.size() < 2 ? 1 : 0;
         }
         if (args[1] == "--version" || args[1] == "-v" || args[1] == "version") {
-            std::cout << "NeoERF " << kNeoErfVersion << "\n";
+            std::cout << "NeoERF " << kVersion << "\n";
             return 0;
         }
 

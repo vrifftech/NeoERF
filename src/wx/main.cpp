@@ -1,7 +1,7 @@
 #include "erf/Archive.hpp"
 #include "erf/ErfPatcher.hpp"
 #include "erf/Utils.hpp"
-#include "erf/Version.hpp"
+#include "core/Version.hpp"
 #include "wx_ui.hpp"
 #include "NeoGameDirectoryMenu.hpp"
 #include "NeoDocumentTabs.hpp"
@@ -600,7 +600,7 @@ private:
         if (index != neotabs::npos) closeDocumentTab(index);
     }
 
-    static std::string appTitle() { return std::string("NeoERF v") + neoerf::kNeoErfVersion + " (ERF/RIM file editor)"; }
+    static std::string appTitle() { return std::string("NeoERF v") + neoerf::kVersion + " (ERF/RIM file editor)"; }
 
     void setApplicationIcon() {
         wxIconBundle bundle;
@@ -818,7 +818,7 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::DragonAgeOrigins); }, ID_ProfileDAO);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::DragonAge2); }, ID_ProfileDA2);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) {
-            wxui::showMessage(this, "About NeoERF", std::string("NeoERF v") + neoerf::kNeoErfVersion + "\nNative wxWidgets ERF/RIM archive editor\n\nA special thanks to everyone in the KOTOR modding community that has contributed their work, knowledge, and creativity to making tools, mods, and guides over the last 20+ years");
+            wxui::showMessage(this, "About NeoERF", std::string("NeoERF v") + neoerf::kVersion + "\nNative wxWidgets ERF/RIM archive editor\n\nA special thanks to everyone in the KOTOR modding community that has contributed their work, knowledge, and creativity to making tools, mods, and guides over the last 20+ years");
         }, wxID_ABOUT);
         Bind(wxEVT_MENU, &NeoERFFrame::onQuit, this, ID_Quit);
         Bind(wxEVT_BUTTON, &NeoERFFrame::onNew, this, ID_New);
