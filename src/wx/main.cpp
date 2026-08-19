@@ -38,8 +38,8 @@
 static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
               "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
 #if defined(__EMSCRIPTEN__)
-static_assert(neobrowser::kBrowserFileApiVersion >= 1u,
-              "NeoERF WebAssembly requires the browser host-file bridge from the current neoshared checkout.");
+static_assert(neobrowser::kBrowserFileApiVersion >= 2u,
+              "NeoERF WebAssembly requires the asynchronous browser host-file bridge from the current neoshared checkout.");
 #endif
 
 namespace {
@@ -1286,11 +1286,15 @@ void onCopyCells(wxCommandEvent&) {
     void chooseAndOpenArchive(
         const std::filesystem::path& initialDirectory = {},
         std::optional<neoerf::ResourceNameProfile> requestedProfile = std::nullopt) {
-        const auto file = wxui::chooseOpenFile(
-            this, "Open ERF/RIM archive", kArchiveWildcard, initialDirectory);
-        if (file) {
-            openArchive(*file, true, requestedProfile);
-        }
+        wxui::requestOpenFile(
+            this,
+            "Open ERF/RIM archive",
+            kArchiveWildcard,
+            initialDirectory,
+            [this, requestedProfile](std::optional<std::filesystem::path> file) {
+                if (!file || IsBeingDeleted()) return;
+                openArchive(*file, true, requestedProfile);
+            });
     }
 
     void onOpen(wxCommandEvent&) {
@@ -1375,26 +1379,11 @@ void onCopyCells(wxCommandEvent&) {
         }
     }
 
-    void onExportArchivePatcher(wxCommandEvent&) {
+    void exportArchivePatcherFromOriginal(const std::filesystem::path& originalPath) {
         try {
             if (!archive().loaded()) {
                 throw std::runtime_error("No archive is loaded.");
             }
-            if (archive().dirty()) {
-                throw std::runtime_error(
-                    "Save the active archive before exporting patcher instructions so the modified archive on disk matches the active tab.");
-            }
-            if (profile() != neoerf::ResourceNameProfile::KotOR || archive().filename_based_resources() ||
-                archive().extended_resrefs() ||
-                (archive().disk_format() != neoerf::ArchiveDiskFormat::ErfV1 &&
-                 archive().disk_format() != neoerf::ArchiveDiskFormat::RimV1)) {
-                throw std::runtime_error(
-                    "NeoERF patcher export supports KotOR/KotOR II ERF, RIM, and MOD archives with 16-byte ResRefs only.");
-            }
-
-            const auto originalPath = wxui::chooseOpenFile(
-                this, "Select the clean original archive", kArchiveWildcard);
-            if (!originalPath) return;
 
             std::string defaultTarget = archive().filename().filename().string();
             if (extensionNoDot(archive().filename()) == "mod") {
@@ -1409,7 +1398,7 @@ void onCopyCells(wxCommandEvent&) {
 
             neoerf::ErfArchive original;
             original.set_resource_type_profile(neoerf::ResourceNameProfile::KotOR);
-            original.load(*originalPath);
+            original.load(originalPath);
             auto result = neoerf::diffArchivePatcher(original, archive(), *targetPath);
             neotsl::throwIfUnsupported(result.project);
 
@@ -1455,14 +1444,48 @@ void onCopyCells(wxCommandEvent&) {
         }
     }
 
+    void onExportArchivePatcher(wxCommandEvent&) {
+        try {
+            if (!archive().loaded()) {
+                throw std::runtime_error("No archive is loaded.");
+            }
+            if (archive().dirty()) {
+                throw std::runtime_error(
+                    "Save the active archive before exporting patcher instructions so the modified archive on disk matches the active tab.");
+            }
+            if (profile() != neoerf::ResourceNameProfile::KotOR || archive().filename_based_resources() ||
+                archive().extended_resrefs() ||
+                (archive().disk_format() != neoerf::ArchiveDiskFormat::ErfV1 &&
+                 archive().disk_format() != neoerf::ArchiveDiskFormat::RimV1)) {
+                throw std::runtime_error(
+                    "NeoERF patcher export supports KotOR/KotOR II ERF, RIM, and MOD archives with 16-byte ResRefs only.");
+            }
+
+            wxui::requestOpenFile(
+                this,
+                "Select the clean original archive",
+                kArchiveWildcard,
+                [this](std::optional<std::filesystem::path> originalPath) {
+                    if (!originalPath || IsBeingDeleted()) return;
+                    exportArchivePatcherFromOriginal(*originalPath);
+                });
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
+    }
+
     void onAdd(wxCommandEvent&) {
         if (!archive().loaded()) {
             return;
         }
-        const auto files = wxui::chooseOpenFiles(this, "Add resources", kAllFilesWildcard);
-        if (!files.empty()) {
-            insertResources(files);
-        }
+        wxui::requestOpenFiles(
+            this,
+            "Add resources",
+            kAllFilesWildcard,
+            [this](std::vector<std::filesystem::path> files) {
+                if (files.empty() || IsBeingDeleted()) return;
+                insertResources(files);
+            });
     }
 
     void onExtract(wxCommandEvent&) {
