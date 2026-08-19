@@ -38,7 +38,7 @@
 static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
               "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
 #if defined(__EMSCRIPTEN__)
-static_assert(neobrowser::kBrowserFileApiVersion >= 2u,
+static_assert(neobrowser::kBrowserFileApiVersion >= 3u,
               "NeoERF WebAssembly requires the asynchronous browser host-file bridge from the current neoshared checkout.");
 #endif
 
@@ -1511,19 +1511,16 @@ void onCopyCells(wxCommandEvent&) {
                 throw std::runtime_error("Save the archive before extracting a newly staged resource.");
             }
             const std::string outputName = neoerf::ascii_lower(row.filename());
-            const auto output = wxui::chooseSaveFile(this, "Download extracted resource", kAllFilesWildcard, outputName);
-            if (!output) {
-                return;
-            }
+            const std::filesystem::path output = neobrowser::createDownloadPath(outputName);
             if (archive().filename_based_resources()) {
-                archive().get_resource_by_name(row.filename(), *output);
+                archive().get_resource_by_name(row.filename(), output);
             } else {
-                archive().get_resource(row.resref, row.restype, *output);
+                archive().get_resource(row.resref, row.restype, output);
             }
-            if (!wxui::publishBrowserFile(*output, output->filename().string())) {
-                throw std::runtime_error("The browser could not download the extracted resource.");
+            if (!wxui::publishBrowserFile(output, outputName)) {
+                throw std::runtime_error("The browser could not prepare the extracted resource for download.");
             }
-            setStatus("1 resource downloaded.", archive().filename().filename().string(), fileCountText());
+            setStatus("Resource ready for download.", archive().filename().filename().string(), fileCountText());
             return;
 #endif
             const auto directory = chooseDirectory(this, "Select a folder to extract selected resources to:");
