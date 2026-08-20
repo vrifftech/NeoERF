@@ -62,8 +62,11 @@ supported.
 
 - The existing wxWidgets menus, dialogs, grids, trees, notebooks, and custom
   drawing code are used through the DOM port.
-- File dialogs import explicit files into the Emscripten virtual filesystem;
-  Save and Export produce browser downloads.
+- File dialogs import explicit files into the Emscripten virtual filesystem.
+- Extract, Save, and Export start an asynchronous browser save transaction.
+  Chromium-family browsers show their native Save File dialog. Other browsers
+  show a conspicuous **Download &lt;filename&gt;** link in the page's top bar;
+  click that real link to complete the download.
 - Non-path preferences use the port's wxConfig/localStorage backend. IDBFS is mounted for browser-owned files, while imported host-file paths are intentionally not persisted.
 - Automatic installed-game discovery is unavailable in the browser. Use the
   normal Open command and explicitly select required files.
@@ -73,7 +76,8 @@ supported.
   selected INI and every companion payload must be updated together. Patcher
   **Fragment** preview, clipboard copy, and download remain available.
 - Writable-directory and directory-wide operations are desktop-only. NeoERF's
-  multi-resource extraction is therefore disabled in the browser build.
+  multi-resource extraction is therefore disabled in the browser build; select
+  one archive resource and use **Extract** for an individual save transaction.
 - Large resources remain constrained by browser memory. The build permits
   memory growth up to 2 GiB but does not guarantee every browser can supply it.
 

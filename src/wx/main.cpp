@@ -31,6 +31,7 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,8 +39,8 @@
 static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
               "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
 #if defined(__EMSCRIPTEN__)
-static_assert(neobrowser::kBrowserFileApiVersion >= 3u,
-              "NeoERF WebAssembly requires the asynchronous browser host-file bridge from the current neoshared checkout.");
+static_assert(neobrowser::kBrowserFileApiVersion >= 4u,
+              "NeoERF WebAssembly requires the browser save-transaction API from the current neoshared checkout.");
 #endif
 
 namespace {
@@ -1319,23 +1320,42 @@ void onCopyCells(wxCommandEvent&) {
 #else
             archive().save();
 #endif
-#if defined(__EMSCRIPTEN__)
-            if (!wxui::publishBrowserFile(
-                    archive().filename(), archive().filename().filename().string())) {
-                throw std::runtime_error("The browser could not download the archive.");
-            }
-#endif
             stagedRows().clear();
             refreshList();
             rememberRecentFile(archive().filename());
             neogames::resolver().inferFromOpenedPath(archive().filename());
+            updateTitle();
+            setProgressVisible(false, 0);
 #if defined(__EMSCRIPTEN__)
-            setStatus("Archive downloaded.", archive().filename().filename().string(), fileCountText());
+            const std::filesystem::path browserPath = archive().filename();
+            const std::string browserName = browserPath.filename().string();
+            setStatus("Opening browser save destination...", browserName, fileCountText());
+            neobrowser::requestDownloadFile(
+                browserPath,
+                browserName,
+                [this, browserName](neobrowser::DownloadResult result) {
+                    if (IsBeingDeleted()) return;
+                    if (!result.error.empty()) {
+                        setStatus("Archive download failed.", browserName, fileCountText());
+                        wxMessageBox(
+                            wxui::toWx(result.error),
+                            "Download Failed",
+                            wxOK | wxICON_ERROR,
+                            this);
+                    } else if (result.saved()) {
+                        setStatus("Archive saved as " + browserName + ".", browserName, fileCountText());
+                    } else if (result.ready()) {
+                        setStatus(
+                            "Archive ready. Click Download " + browserName + " in the browser bar.",
+                            browserName,
+                            fileCountText());
+                    } else {
+                        setStatus("Archive download cancelled.", browserName, fileCountText());
+                    }
+                });
 #else
             setStatus("Changes saved to file " + archive().filename().filename().string() + ".", archive().filename().filename().string(), fileCountText());
 #endif
-            updateTitle();
-            setProgressVisible(false, 0);
         } catch (const std::exception& ex) {
             setProgressVisible(false, 0);
             wxui::showError(this, ex);
@@ -1357,22 +1377,42 @@ void onCopyCells(wxCommandEvent&) {
             }
             setProgressVisible(true, 1);
             archive().save(*file);
-#if defined(__EMSCRIPTEN__)
-            if (!wxui::publishBrowserFile(*file, file->filename().string())) {
-                throw std::runtime_error("The browser could not download the archive.");
-            }
-#endif
             stagedRows().clear();
             refreshList();
             rememberRecentFile(archive().filename());
             neogames::resolver().inferFromOpenedPath(archive().filename());
+            updateTitle();
+            setProgressVisible(false, 0);
 #if defined(__EMSCRIPTEN__)
-            setStatus("Archive downloaded as " + file->filename().string() + ".", file->filename().string(), fileCountText());
+            const std::filesystem::path browserPath = *file;
+            const std::string browserName = browserPath.filename().string();
+            setStatus("Opening browser save destination...", browserName, fileCountText());
+            neobrowser::requestDownloadFile(
+                browserPath,
+                browserName,
+                [this, browserName](neobrowser::DownloadResult result) {
+                    if (IsBeingDeleted()) return;
+                    if (!result.error.empty()) {
+                        setStatus("Archive download failed.", browserName, fileCountText());
+                        wxMessageBox(
+                            wxui::toWx(result.error),
+                            "Download Failed",
+                            wxOK | wxICON_ERROR,
+                            this);
+                    } else if (result.saved()) {
+                        setStatus("Archive saved as " + browserName + ".", browserName, fileCountText());
+                    } else if (result.ready()) {
+                        setStatus(
+                            "Archive ready. Click Download " + browserName + " in the browser bar.",
+                            browserName,
+                            fileCountText());
+                    } else {
+                        setStatus("Archive download cancelled.", browserName, fileCountText());
+                    }
+                });
 #else
             setStatus("File saved as " + archive().filename().filename().string() + ".", archive().filename().filename().string(), fileCountText());
 #endif
-            updateTitle();
-            setProgressVisible(false, 0);
         } catch (const std::exception& ex) {
             setProgressVisible(false, 0);
             wxui::showError(this, ex);
@@ -1517,10 +1557,40 @@ void onCopyCells(wxCommandEvent&) {
             } else {
                 archive().get_resource(row.resref, row.restype, output);
             }
-            if (!wxui::publishBrowserFile(output, outputName)) {
-                throw std::runtime_error("The browser could not prepare the extracted resource for download.");
-            }
-            setStatus("Resource ready for download.", archive().filename().filename().string(), fileCountText());
+            const std::string archiveName = archive().filename().filename().string();
+            setStatus("Opening browser save destination...", archiveName, fileCountText());
+            neobrowser::requestDownloadFile(
+                output,
+                outputName,
+                [this, output, outputName, archiveName](neobrowser::DownloadResult result) {
+                    std::error_code cleanupError;
+                    std::filesystem::remove(output, cleanupError);
+                    std::filesystem::remove(output.parent_path(), cleanupError);
+
+                    if (IsBeingDeleted()) return;
+                    if (!result.error.empty()) {
+                        setStatus("Download failed.", archiveName, fileCountText());
+                        wxMessageBox(
+                            wxui::toWx(result.error),
+                            "Download Failed",
+                            wxOK | wxICON_ERROR,
+                            this);
+                        return;
+                    }
+                    if (result.saved()) {
+                        setStatus(
+                            "Resource saved as " + outputName + ".",
+                            archiveName,
+                            fileCountText());
+                    } else if (result.ready()) {
+                        setStatus(
+                            "Resource ready. Click Download " + outputName + " in the browser bar.",
+                            archiveName,
+                            fileCountText());
+                    } else {
+                        setStatus("Resource download cancelled.", archiveName, fileCountText());
+                    }
+                });
             return;
 #endif
             const auto directory = chooseDirectory(this, "Select a folder to extract selected resources to:");
