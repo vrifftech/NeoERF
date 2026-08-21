@@ -63,10 +63,10 @@ supported.
 - The existing wxWidgets menus, dialogs, grids, trees, notebooks, and custom
   drawing code are used through the DOM port.
 - File dialogs import explicit files into the Emscripten virtual filesystem.
-- Extract, Save, and Export start an asynchronous browser save transaction.
-  Chromium-family browsers show their native Save File dialog. Other browsers
-  show a conspicuous **Download &lt;filename&gt;** link in the page's top bar;
-  click that real link to complete the download.
+- Extract, Save, and Export prepare a conspicuous **Download
+  &lt;filename&gt;** action above the editor. Click that normal browser link to
+  complete the transfer. The application does not open a native Save File
+  picker from inside wxWidgets-WASM event dispatch.
 - Non-path preferences use the port's wxConfig/localStorage backend. IDBFS is mounted for browser-owned files, while imported host-file paths are intentionally not persisted.
 - Automatic installed-game discovery is unavailable in the browser. Use the
   normal Open command and explicitly select required files.

@@ -129,6 +129,8 @@ public:
     void reset(bool destroying = false);
 
     void add_resource(const std::filesystem::path& filename, bool replace, std::string save_as = {});
+    std::vector<std::uint8_t> read_resource(const std::string& resref, std::uint16_t res_type);
+    std::vector<std::uint8_t> read_resource_by_name(const std::string& resource_name);
     void get_resource(const std::string& resref, std::uint16_t res_type, std::filesystem::path filename = {});
     void get_resource_by_name(const std::string& resource_name, std::filesystem::path filename = {});
     void delete_resource(const std::string& resref, std::uint16_t res_type);

@@ -39,8 +39,8 @@
 static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
               "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
 #if defined(__EMSCRIPTEN__)
-static_assert(neobrowser::kBrowserFileApiVersion >= 4u,
-              "NeoERF WebAssembly requires the browser save-transaction API from the current neoshared checkout.");
+static_assert(neobrowser::kBrowserFileApiVersion >= 5u,
+              "NeoERF WebAssembly requires the nonblocking browser download API from the current neoshared checkout.");
 #endif
 
 namespace {
@@ -1329,7 +1329,7 @@ void onCopyCells(wxCommandEvent&) {
 #if defined(__EMSCRIPTEN__)
             const std::filesystem::path browserPath = archive().filename();
             const std::string browserName = browserPath.filename().string();
-            setStatus("Opening browser save destination...", browserName, fileCountText());
+            setStatus("Preparing browser download...", browserName, fileCountText());
             neobrowser::requestDownloadFile(
                 browserPath,
                 browserName,
@@ -1346,7 +1346,7 @@ void onCopyCells(wxCommandEvent&) {
                         setStatus("Archive saved as " + browserName + ".", browserName, fileCountText());
                     } else if (result.ready()) {
                         setStatus(
-                            "Archive ready. Click Download " + browserName + " in the browser bar.",
+                            "Archive ready. Use the Download " + browserName + " action shown above the editor.",
                             browserName,
                             fileCountText());
                     } else {
@@ -1386,7 +1386,7 @@ void onCopyCells(wxCommandEvent&) {
 #if defined(__EMSCRIPTEN__)
             const std::filesystem::path browserPath = *file;
             const std::string browserName = browserPath.filename().string();
-            setStatus("Opening browser save destination...", browserName, fileCountText());
+            setStatus("Preparing browser download...", browserName, fileCountText());
             neobrowser::requestDownloadFile(
                 browserPath,
                 browserName,
@@ -1403,7 +1403,7 @@ void onCopyCells(wxCommandEvent&) {
                         setStatus("Archive saved as " + browserName + ".", browserName, fileCountText());
                     } else if (result.ready()) {
                         setStatus(
-                            "Archive ready. Click Download " + browserName + " in the browser bar.",
+                            "Archive ready. Use the Download " + browserName + " action shown above the editor.",
                             browserName,
                             fileCountText());
                     } else {
@@ -1546,49 +1546,51 @@ void onCopyCells(wxCommandEvent&) {
             if (data < 0 || static_cast<std::size_t>(data) >= displayRows_.size()) {
                 throw std::runtime_error("The selected resource is no longer available.");
             }
-            const auto& row = displayRows_[static_cast<std::size_t>(data)];
+            const auto row = displayRows_[static_cast<std::size_t>(data)];
             if (row.staged) {
                 throw std::runtime_error("Save the archive before extracting a newly staged resource.");
             }
-            const std::string outputName = neoerf::ascii_lower(row.filename());
-            const std::filesystem::path output = neobrowser::createDownloadPath(outputName);
-            if (archive().filename_based_resources()) {
-                archive().get_resource_by_name(row.filename(), output);
-            } else {
-                archive().get_resource(row.resref, row.restype, output);
-            }
-            const std::string archiveName = archive().filename().filename().string();
-            setStatus("Opening browser save destination...", archiveName, fileCountText());
-            neobrowser::requestDownloadFile(
-                output,
-                outputName,
-                [this, output, outputName, archiveName](neobrowser::DownloadResult result) {
-                    std::error_code cleanupError;
-                    std::filesystem::remove(output, cleanupError);
-                    std::filesystem::remove(output.parent_path(), cleanupError);
 
+            const bool filenameBased = archive().filename_based_resources();
+            const std::string outputName = neoerf::ascii_lower(row.filename());
+            const std::string archiveName = archive().filename().filename().string();
+            const std::filesystem::path activeArchive = archive().filename();
+            setStatus("Preparing " + outputName + "...", archiveName, fileCountText());
+
+            // Leave the synchronous wxWidgets-WASM DOM event before reading or
+            // decompressing the resource. The browser port enters button/menu
+            // handlers through a synchronous ccall; doing filesystem durability
+            // work or opening a native save picker in that chain can strand its
+            // event-dispatch interlock and make the whole application appear frozen.
+            wxTheApp->CallAfter(
+                [this, row, filenameBased, outputName, archiveName, activeArchive]() {
                     if (IsBeingDeleted()) return;
-                    if (!result.error.empty()) {
-                        setStatus("Download failed.", archiveName, fileCountText());
-                        wxMessageBox(
-                            wxui::toWx(result.error),
-                            "Download Failed",
-                            wxOK | wxICON_ERROR,
-                            this);
-                        return;
-                    }
-                    if (result.saved()) {
+                    try {
+                        if (!archive().loaded() || archive().filename() != activeArchive) {
+                            throw std::runtime_error(
+                                "The active archive changed before extraction completed. Select the resource again.");
+                        }
+
+                        std::vector<std::uint8_t> bytes = filenameBased
+                            ? archive().read_resource_by_name(row.filename())
+                            : archive().read_resource(row.resref, row.restype);
+                        if (!neobrowser::prepareDownloadBytes(
+                                bytes.empty() ? nullptr : bytes.data(),
+                                bytes.size(),
+                                outputName)) {
+                            throw std::runtime_error(
+                                "The browser could not prepare the extracted resource for download.");
+                        }
+
                         setStatus(
-                            "Resource saved as " + outputName + ".",
+                            "Resource ready. Use the Download " + outputName +
+                                " action shown above the editor.",
                             archiveName,
                             fileCountText());
-                    } else if (result.ready()) {
-                        setStatus(
-                            "Resource ready. Click Download " + outputName + " in the browser bar.",
-                            archiveName,
-                            fileCountText());
-                    } else {
-                        setStatus("Resource download cancelled.", archiveName, fileCountText());
+                    } catch (const std::exception& ex) {
+                        if (IsBeingDeleted()) return;
+                        setStatus("Resource extraction failed.", archiveName, fileCountText());
+                        wxui::showError(this, ex);
                     }
                 });
             return;

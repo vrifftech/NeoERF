@@ -2192,6 +2192,51 @@ void copy_resource_payload_to_stream(std::istream& archive,
     }
 }
 
+
+class VectorOutputStreamBuf final : public std::streambuf {
+public:
+    explicit VectorOutputStreamBuf(std::size_t expected_size) {
+        bytes_.reserve(expected_size);
+    }
+
+    std::vector<std::uint8_t> take() && {
+        return std::move(bytes_);
+    }
+
+protected:
+    std::streamsize xsputn(const char* source, std::streamsize count) override {
+        if (count <= 0) return 0;
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(source);
+        bytes_.insert(bytes_.end(), begin, begin + static_cast<std::size_t>(count));
+        return count;
+    }
+
+    int_type overflow(int_type value) override {
+        if (traits_type::eq_int_type(value, traits_type::eof())) {
+            return traits_type::not_eof(value);
+        }
+        bytes_.push_back(static_cast<std::uint8_t>(traits_type::to_char_type(value)));
+        return value;
+    }
+
+private:
+    std::vector<std::uint8_t> bytes_;
+};
+
+std::vector<std::uint8_t> read_resource_payload_bytes(std::istream& archive,
+                                                      const Resource& resource,
+                                                      ArchiveDiskFormat disk_format,
+                                                      std::uint32_t archive_flags) {
+    VectorOutputStreamBuf buffer(resource.data_size);
+    std::ostream output(&buffer);
+    copy_resource_payload_to_stream(archive, output, resource, disk_format, archive_flags);
+    output.flush();
+    if (!output) {
+        throw ErfError("Failed to prepare the resource payload in memory.");
+    }
+    return std::move(buffer).take();
+}
+
 std::string zlib_result_message(const char* operation, int code, const z_stream& stream) {
     std::string message = std::string(operation) + " failed";
     if (stream.msg != nullptr) {
@@ -3641,6 +3686,46 @@ void ErfArchive::add_resource(const std::filesystem::path& filename, bool replac
     new_names_.push_back(save_leaf);
     new_resource_metadata_.push_back(Resource{});
     dirty_ = true;
+}
+
+
+std::vector<std::uint8_t> ErfArchive::read_resource(const std::string& resref,
+                                                    std::uint16_t res_type) {
+    ensure_loaded_for_operation("Unable to read resource from file, no ERF file is open!");
+    if (!archive_stream_.is_open()) {
+        throw ErfError("Unable to read resource from file, the file could not be read!");
+    }
+
+    const Resource* resource = find_resource(resref, res_type);
+    if (resource == nullptr) {
+        throw ErfError("Resource \"" + resref + "." +
+                       Resource::res_type_to_string(res_type, resource_type_profile_) +
+                       "\" could not be found in the ERF file. Unable to extract it!");
+    }
+
+    ensure_archive_stream();
+    archive_stream_.clear();
+    return read_resource_payload_bytes(
+        archive_stream_, *resource, disk_format_, archive_flags());
+}
+
+std::vector<std::uint8_t> ErfArchive::read_resource_by_name(
+    const std::string& resource_name) {
+    ensure_loaded_for_operation("Unable to read resource from file, no ERF file is open!");
+    if (!archive_stream_.is_open()) {
+        throw ErfError("Unable to read resource from file, the file could not be read!");
+    }
+
+    const Resource* resource = find_resource_by_name(resource_name);
+    if (resource == nullptr) {
+        throw ErfError("Resource \"" + normalize_archive_leaf(resource_name) +
+                       "\" could not be found in the ERF file. Unable to extract it!");
+    }
+
+    ensure_archive_stream();
+    archive_stream_.clear();
+    return read_resource_payload_bytes(
+        archive_stream_, *resource, disk_format_, archive_flags());
 }
 
 void ErfArchive::get_resource(const std::string& resref, std::uint16_t res_type, std::filesystem::path filename) {
