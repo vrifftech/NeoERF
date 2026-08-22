@@ -67,6 +67,10 @@ supported.
   archive through a nonblocking queue. Existing-resource decisions are shown
   without suspending the browser event loop. After staging, use **Save** to
   download the rebuilt archive.
+- **Delete selected** uses a nonmodal confirmation and removes both existing
+  archive entries and newly staged entries without blocking wxWidgets-WASM
+  event dispatch. The host file is not modified in place; use **Save** to
+  download the rebuilt archive after removal.
 - Extract, Save, and Export prepare a conspicuous **Download
   &lt;filename&gt;** action above the editor. Click that normal browser link to
   complete the transfer. The application does not open a native Save File
