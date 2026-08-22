@@ -79,17 +79,30 @@ supported.
 - Extract and Export use the same persistent browser-download action. Click the
   normal browser link to complete the transfer; the source host file is never
   modified in place.
-- Non-path preferences use the port's wxConfig/localStorage backend. IDBFS is mounted for browser-owned files, while imported host-file paths are intentionally not persisted.
+- **Open Recent** keeps up to ten imported archives available for the current
+  browser page session and reopens those in-memory filesystem copies without
+  showing the host file picker again. The list is cleared by a page reload:
+  browsers do not provide a reusable host path, and NeoERF does not silently
+  retain archive contents in persistent browser storage.
+- Non-path preferences use the port's wxConfig/localStorage backend. IDBFS is
+  mounted for browser-owned settings, while imported host-file paths and recent
+  archive contents are intentionally not persisted across page reloads.
 - Automatic installed-game discovery is unavailable in the browser. Use the
   normal Open command and explicitly select required files.
 - The browser build does not launch Finder, Explorer, another NeoTool, or an
   unrestricted native process.
-- Package-aware **Write to INI** is disabled in the browser build because the
-  selected INI and every companion payload must be updated together. Patcher
-  **Fragment** preview, clipboard copy, and download remain available.
-- Writable-directory and directory-wide operations are desktop-only. NeoERF's
-  multi-resource extraction is therefore disabled in the browser build; select
-  one archive resource and use **Extract** for an individual save transaction.
+- Patcher export provides both required output modes. **Fragment** previews the
+  exact generated text, supports clipboard/download, creates no payloads, and
+  omits `[Settings]`. On browsers with writable directory access, **Write to
+  INI** asks for one installer folder, lists every existing INI by exact
+  package-relative path, permits a new relative INI path, conservatively merges
+  the generated `InstallList` instructions, stages payloads beside that exact
+  INI, preserves a custom `info.rtf`, rejects same-name payload conflicts, and
+  commits the INI last. Browsers without the directory API remain Fragment-only.
+- General directory-wide operations remain unavailable. The narrowly scoped
+  patcher package transaction above is the exception. NeoERF's multi-resource
+  extraction remains disabled in the browser build; select one archive resource
+  and use **Extract** for an individual download.
 - Large resources remain constrained by browser memory. The build permits
   memory growth up to 2 GiB but does not guarantee every browser can supply it.
 

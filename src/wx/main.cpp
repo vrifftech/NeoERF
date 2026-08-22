@@ -39,11 +39,13 @@
 #include <utility>
 #include <vector>
 
-static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
+static_assert(wxui::kPatcherExportUiApiVersion >= 4u,
               "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
 #if defined(__EMSCRIPTEN__)
-static_assert(neobrowser::kBrowserFileApiVersion >= 5u,
-              "NeoERF WebAssembly requires the nonblocking browser download API from the current neoshared checkout.");
+static_assert(neobrowser::kBrowserFileApiVersion >= 6u,
+              "NeoERF WebAssembly requires browser archive and installer-package APIs from the current neoshared checkout.");
+static_assert(neosettings::kRecentFilesApiVersion >= 1u,
+              "NeoERF WebAssembly requires session-safe recent-file support from the current neoshared checkout.");
 #endif
 
 namespace {
@@ -391,13 +393,32 @@ public:
         const int index = event.GetId() - kRecentFileBaseId;
         const auto files = settings_.recentFiles();
         if (index < 0 || static_cast<std::size_t>(index) >= files.size()) return;
-        if (!std::filesystem::exists(files[static_cast<std::size_t>(index)])) {
-            settings_.removeRecentFile(files[static_cast<std::size_t>(index)]);
+        const std::filesystem::path file = files[static_cast<std::size_t>(index)];
+#if defined(__EMSCRIPTEN__)
+        // wxWidgets-WASM enters menu handlers through a synchronous browser
+        // dispatch. Reopen only after that dispatch has unwound so parsing a
+        // large archive cannot strand the menu-event interlock.
+        CallAfter([this, file]() {
+            if (IsBeingDeleted()) return;
+            if (!std::filesystem::exists(file)) {
+                settings_.removeRecentFile(file);
+                rebuildRecentFilesMenu();
+                wxui::showMessage(this, "Recent File Missing",
+                                  "This browser-session copy is no longer available:\n" +
+                                      file.filename().string());
+                return;
+            }
+            openArchive(file, true);
+        });
+#else
+        if (!std::filesystem::exists(file)) {
+            settings_.removeRecentFile(file);
             rebuildRecentFilesMenu();
-            wxui::showMessage(this, "Recent File Missing", "Recent file no longer exists:\n" + files[static_cast<std::size_t>(index)].string());
+            wxui::showMessage(this, "Recent File Missing", "Recent file no longer exists:\n" + file.string());
             return;
         }
-        openArchive(files[static_cast<std::size_t>(index)], true);
+        openArchive(file, true);
+#endif
     }
 
     void onClearRecentFiles(wxCommandEvent&) {
@@ -553,7 +574,8 @@ private:
             wxui::showMessage(this, "Save Archive", "No archive is loaded.");
             return;
         }
-        if (browserArchiveSave_ || browserResourceImport_ || browserResourceDelete_) {
+        if (browserArchiveSave_ || browserResourceImport_ || browserResourceDelete_ ||
+            browserPatcherExport_) {
             setStatus(
                 "Finish the current archive operation before saving.",
                 neoerf::filename_string(archive().filename()),
@@ -673,7 +695,7 @@ private:
             return;
         }
         if (browserSaveAsDialog_ != nullptr || browserArchiveSave_ ||
-            browserResourceImport_ || browserResourceDelete_) {
+            browserResourceImport_ || browserResourceDelete_ || browserPatcherExport_) {
             return;
         }
 
@@ -751,9 +773,9 @@ private:
         if (files.empty() || !archive().loaded()) {
             return;
         }
-        if (browserArchiveSave_ || browserSaveAsDialog_ != nullptr) {
+        if (browserArchiveSave_ || browserSaveAsDialog_ != nullptr || browserPatcherExport_) {
             setStatus(
-                "Finish saving the archive before adding more files.",
+                "Finish saving or exporting the archive before adding more files.",
                 neoerf::filename_string(archive().filename()),
                 fileCountText());
             return;
@@ -1029,9 +1051,9 @@ private:
                 fileCountText());
             return;
         }
-        if (browserArchiveSave_ || browserSaveAsDialog_ != nullptr) {
+        if (browserArchiveSave_ || browserSaveAsDialog_ != nullptr || browserPatcherExport_) {
             setStatus(
-                "Finish saving the archive before removing resources.",
+                "Finish saving or exporting the archive before removing resources.",
                 neoerf::filename_string(archive().filename()),
                 fileCountText());
             return;
@@ -1256,6 +1278,236 @@ private:
             : std::string{};
         setStatus(message, archiveName, sameDocument ? fileCountText() : std::string{});
         updateUiState();
+    }
+
+    struct BrowserPatcherExportRequest {
+        wxWindow* documentPage = nullptr;
+        std::filesystem::path archivePath;
+        neoerf::ArchivePatcherResult result;
+        wxui::PatcherOutputSelection output;
+        std::vector<std::string> relativeFiles;
+        std::filesystem::path workspaceRoot;
+        std::filesystem::path workspaceIni;
+        bool iniExisted = false;
+    };
+
+    bool browserPatcherExportStillTargetsActiveDocument() const {
+        return browserPatcherExport_ &&
+               hasActiveDocument() &&
+               activeDocument().tabPage == browserPatcherExport_->documentPage &&
+               archive().loaded() &&
+               archive().filename() == browserPatcherExport_->archivePath;
+    }
+
+    static std::string browserPackagePathKey(std::string path) {
+        path = neobrowser::normalizePackageRelativePath(std::move(path), false);
+        std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return path;
+    }
+
+    static std::vector<std::string> browserPatcherRelativeFiles(
+        const neoerf::ArchivePatcherResult& result,
+        const std::string& relativeIniPath) {
+        const std::string normalizedIni =
+            neobrowser::normalizePackageRelativePath(relativeIniPath, true);
+        const std::filesystem::path parent =
+            std::filesystem::path(normalizedIni).parent_path();
+        std::vector<std::string> files;
+        std::vector<std::string> keys;
+        auto add = [&](const std::filesystem::path& relative) {
+            const std::string normalized = neobrowser::normalizePackageRelativePath(
+                relative.generic_string(), false);
+            const std::string key = browserPackagePathKey(normalized);
+            if (std::find(keys.begin(), keys.end(), key) != keys.end()) return;
+            keys.push_back(key);
+            files.push_back(normalized);
+        };
+        for (const auto& change : result.changes) {
+            add(parent / change.payloadName);
+        }
+        add(parent / "info.rtf");
+        add(normalizedIni);
+        return files;
+    }
+
+    void beginBrowserPatcherExport(neoerf::ArchivePatcherResult result,
+                                   const wxui::PatcherOutputSelection& output) {
+        if (browserArchiveSave_ || browserResourceImport_ || browserResourceDelete_ ||
+            browserPatcherExport_) {
+            setStatus(
+                "Finish the current archive operation before exporting a patcher package.",
+                archive().loaded() ? neoerf::filename_string(archive().filename()) : std::string{},
+                archive().loaded() ? fileCountText() : std::string{});
+            return;
+        }
+        if (!output.writesToIni() || output.browserDirectorySession == 0) {
+            wxui::showMessage(
+                this,
+                "Patcher Export",
+                "Select an installer folder and an exact package-relative INI path.");
+            return;
+        }
+
+        try {
+            const std::string relativeIni = neobrowser::normalizePackageRelativePath(
+                output.browserIniPath, true);
+            auto request = std::make_unique<BrowserPatcherExportRequest>();
+            request->documentPage = activeDocument().tabPage;
+            request->archivePath = archive().filename();
+            request->result = std::move(result);
+            request->output = output;
+            request->output.browserIniPath = relativeIni;
+            request->relativeFiles = browserPatcherRelativeFiles(
+                request->result, relativeIni);
+            browserPatcherExport_ = std::move(request);
+
+            setProgressVisible(true, 3);
+            updateProgress(1);
+            setStatus(
+                "Reading the selected installer INI and checking package payloads...",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            updateUiState();
+
+            neobrowser::requestPackageWorkspace(
+                browserPatcherExport_->output.browserDirectorySession,
+                browserPatcherExport_->output.browserIniPath,
+                browserPatcherExport_->relativeFiles,
+                [this](neobrowser::PackageWorkspaceResult workspace) {
+                    if (IsBeingDeleted() || !browserPatcherExport_) return;
+                    if (!workspace.error.empty()) {
+                        finishBrowserPatcherExport(workspace.error, std::nullopt);
+                        return;
+                    }
+                    if (!browserPatcherExportStillTargetsActiveDocument()) {
+                        finishBrowserPatcherExport(
+                            "Patcher export was cancelled because the active archive changed.",
+                            std::nullopt);
+                        return;
+                    }
+                    browserPatcherExport_->workspaceRoot = std::move(workspace.workspaceRoot);
+                    browserPatcherExport_->workspaceIni = std::move(workspace.iniPath);
+                    browserPatcherExport_->iniExisted = workspace.iniExisted;
+                    updateProgress(2);
+                    setStatus(
+                        "Generating installer instructions and archive payloads...",
+                        neoerf::filename_string(archive().filename()),
+                        fileCountText());
+                    CallAfter([this]() { processBrowserPatcherExport(); });
+                });
+        } catch (const std::exception& exception) {
+            setProgressVisible(false, 0);
+            browserPatcherExport_.reset();
+            updateUiState();
+            wxui::showError(this, exception);
+        }
+    }
+
+    void processBrowserPatcherExport() {
+        if (!browserPatcherExport_ || IsBeingDeleted()) return;
+        if (!browserPatcherExportStillTargetsActiveDocument()) {
+            finishBrowserPatcherExport(
+                "Patcher export was cancelled because the active archive changed.",
+                std::nullopt);
+            return;
+        }
+
+        try {
+            neoerf::writeArchivePatcherPackageToIni(
+                browserPatcherExport_->result,
+                archive(),
+                browserPatcherExport_->workspaceIni,
+                false);
+            updateProgress(3);
+            setStatus(
+                "Committing payloads and the selected installer INI...",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            neobrowser::requestCommitPackageWorkspace(
+                browserPatcherExport_->output.browserDirectorySession,
+                browserPatcherExport_->workspaceRoot,
+                browserPatcherExport_->output.browserIniPath,
+                browserPatcherExport_->relativeFiles,
+                [this](neobrowser::PackageCommitResult result) {
+                    if (IsBeingDeleted() || !browserPatcherExport_) return;
+                    if (!result.error.empty()) {
+                        finishBrowserPatcherExport(result.error, std::nullopt);
+                        return;
+                    }
+                    finishBrowserPatcherExport({}, result);
+                });
+        } catch (const std::exception& exception) {
+            finishBrowserPatcherExport(exception.what(), std::nullopt);
+        }
+    }
+
+    void finishBrowserPatcherExport(
+        const std::string& error,
+        std::optional<neobrowser::PackageCommitResult> commit) {
+        if (!browserPatcherExport_) return;
+        std::unique_ptr<BrowserPatcherExportRequest> completed =
+            std::move(browserPatcherExport_);
+        setProgressVisible(false, 0);
+        updateUiState();
+
+        if (!completed->workspaceRoot.empty()) {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(completed->workspaceRoot, cleanupError);
+            if (cleanupError) {
+                std::fprintf(
+                    stderr,
+                    "[NeoERF] Unable to remove temporary browser patcher workspace %s: %s\n",
+                    neoerf::path_to_string(completed->workspaceRoot).c_str(),
+                    cleanupError.message().c_str());
+            }
+        }
+
+        const bool sameDocument = hasActiveDocument() &&
+            activeDocument().tabPage == completed->documentPage &&
+            archive().loaded() &&
+            archive().filename() == completed->archivePath;
+        const std::string archiveName = sameDocument
+            ? neoerf::filename_string(archive().filename())
+            : std::string{};
+        if (!error.empty()) {
+            setStatus(
+                "Patcher package export failed.",
+                archiveName,
+                sameDocument ? fileCountText() : std::string{});
+            wxMessageBox(
+                wxui::toWx(error),
+                "Unable to Export Patcher Package",
+                wxOK | wxICON_ERROR,
+                this);
+            return;
+        }
+
+        const neobrowser::PackageCommitResult report = commit.value_or(
+            neobrowser::PackageCommitResult{});
+        std::ostringstream message;
+        if (report.iniChanged) {
+            message << (completed->iniExisted
+                ? "Merged archive instructions into:\n"
+                : "Created the installer INI:\n");
+        } else {
+            message << "The selected installer INI already represented these instructions:\n";
+        }
+        message << completed->output.browserIniPath
+                << "\n\nPayload and package files written: " << report.filesWritten
+                << "\nExisting identical files reused: " << report.filesReused
+                << "\n\nAdded resource instructions: " << completed->result.installCount()
+                << "\nReplacement instructions: " << completed->result.replacementCount();
+
+        setStatus(
+            report.filesWritten == 0u
+                ? "Patcher package already up to date."
+                : "Patcher package exported.",
+            archiveName,
+            std::to_string(completed->result.installCount()) + " added, " +
+                std::to_string(completed->result.replacementCount()) + " replaced");
+        wxui::showMessage(this, "Patcher Package Exported", message.str());
     }
 #endif
 
@@ -1917,8 +2169,9 @@ private:
         const bool browserDeleteBusy = browserResourceDelete_ != nullptr;
         const bool browserSaveBusy = browserArchiveSave_ != nullptr ||
                                      browserSaveAsDialog_ != nullptr;
+        const bool browserPatcherBusy = browserPatcherExport_ != nullptr;
         const bool browserMutationBusy = browserImportBusy || browserDeleteBusy ||
-                                         browserSaveBusy;
+                                         browserSaveBusy || browserPatcherBusy;
 #else
         constexpr bool browserMutationBusy = false;
 #endif
@@ -2239,7 +2492,8 @@ void onCopyCells(wxCommandEvent&) {
                 if (!wxui::confirm(this, "Archive Resource Patch Warning", warning.str())) return;
             }
 
-            const auto output = wxui::choosePatcherOutput(this);
+            const auto output = wxui::choosePatcherOutput(
+                this, {}, "changes.ini", true);
             if (!output) return;
 
             if (!output->writesToIni()) {
@@ -2254,6 +2508,9 @@ void onCopyCells(wxCommandEvent&) {
                 return;
             }
 
+#if defined(__EMSCRIPTEN__)
+            beginBrowserPatcherExport(std::move(result), *output);
+#else
             const bool mergedExisting = std::filesystem::exists(output->iniPath);
             neoerf::writeArchivePatcherPackageToIni(result, archive(), output->iniPath, false);
             setStatus("Patcher package exported.", archive().filename().filename().string(),
@@ -2267,6 +2524,7 @@ void onCopyCells(wxCommandEvent&) {
                     neosettings::pathToUtf8(output->iniPath) + "\n\nStaged " +
                     std::to_string(result.changes.size()) +
                     " resource payload(s) beside the selected INI.");
+#endif
         } catch (const std::exception& ex) {
             wxui::showError(this, ex);
         }
@@ -2779,6 +3037,7 @@ void onCopyCells(wxCommandEvent&) {
     wxDialog* browserReplaceDialog_ = nullptr;
     std::unique_ptr<BrowserResourceDeleteBatch> browserResourceDelete_;
     wxDialog* browserDeleteDialog_ = nullptr;
+    std::unique_ptr<BrowserPatcherExportRequest> browserPatcherExport_;
 #endif
     std::vector<ResourceRow> displayRows_;
     int contextVisualColumn_ = 0;
