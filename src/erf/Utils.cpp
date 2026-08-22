@@ -239,6 +239,7 @@ private:
 };
 
 #if !defined(_WIN32)
+#if !defined(__EMSCRIPTEN__)
 bool fsync_retry(int fd) {
     for (;;) {
         if (::fsync(fd) == 0) {
@@ -249,6 +250,7 @@ bool fsync_retry(int fd) {
         }
     }
 }
+#endif
 
 int close_on_exec_flag() {
 #ifdef O_CLOEXEC
@@ -258,6 +260,7 @@ int close_on_exec_flag() {
 #endif
 }
 
+#if !defined(__EMSCRIPTEN__)
 void fsync_parent_directory_after_copy_replace(const std::filesystem::path& target) {
     std::filesystem::path dir = target.parent_path();
     if (dir.empty()) {
@@ -278,6 +281,7 @@ void fsync_parent_directory_after_copy_replace(const std::filesystem::path& targ
         throw std::runtime_error("Unable to close output directory after copy replace: " + path_to_string(dir));
     }
 }
+#endif
 
 int safe_open_read_flags() {
     return O_RDONLY | O_NONBLOCK | close_on_exec_flag();
@@ -438,6 +442,21 @@ void replace_file_after_successful_copy(const std::filesystem::path& source,
     }
     if (!same_regular_file_identity(destination, source_identity)) {
         throw std::runtime_error("Copied destination does not match the verified temporary copy: " + path_to_string(destination));
+    }
+#elif defined(__EMSCRIPTEN__)
+    (void)replace_existing;
+    // Browser save staging lives entirely in MEMFS. Rename the verified temp
+    // node instead of relying on hard-link and directory-fsync semantics that
+    // exist only to protect persistent desktop filesystems.
+    std::error_code ec;
+    std::filesystem::rename(source, destination, ec);
+    if (ec) {
+        throw std::runtime_error("Unable to finalize browser save staging file: " +
+                                 path_to_string(destination) + ": " + ec.message());
+    }
+    if (!same_regular_file_identity(destination, source_identity)) {
+        throw std::runtime_error("Browser save staging destination does not match the verified temporary copy: " +
+                                 path_to_string(destination));
     }
 #else
     if (replace_existing) {
@@ -715,9 +734,11 @@ FileIdentity copy_file_limited_impl(const std::filesystem::path& source, const s
         }
         remaining -= static_cast<std::uintmax_t>(want);
     }
+#if !defined(__EMSCRIPTEN__)
     if (!fsync_retry(out.get())) {
         throw std::runtime_error("Unable to flush copied file data to " + path_to_string(temp_destination));
     }
+#endif
     if (!out.close()) {
         throw std::runtime_error("Unable to close copied file " + path_to_string(temp_destination));
     }

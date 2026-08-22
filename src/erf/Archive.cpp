@@ -1411,6 +1411,7 @@ private:
 };
 #else
 
+#if !defined(__EMSCRIPTEN__)
 bool fsync_retry(int fd) {
     for (;;) {
         if (::fsync(fd) == 0) {
@@ -1421,6 +1422,7 @@ bool fsync_retry(int fd) {
         }
     }
 }
+#endif
 
 enum class OutputCreateMode { Create, CreateNew };
 struct ScopedWin32ShareHandle {};
@@ -1564,9 +1566,11 @@ public:
         if (!stream_) {
             throw ErfError("Failed to flush output file.");
         }
+#if !defined(__EMSCRIPTEN__)
         if (!fsync_retry(fd_.get())) {
             throw ErfError("Failed to flush output file to disk.");
         }
+#endif
         if (!fd_.close()) {
             throw ErfError("Failed to close output file.");
         }
@@ -1993,7 +1997,7 @@ void verify_temp_archive_before_replace(const std::filesystem::path& filename) {
 
 
 
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 void fsync_parent_directory_after_replace(const std::filesystem::path& target) {
     std::filesystem::path dir = target.parent_path();
     if (dir.empty()) {
@@ -2028,6 +2032,21 @@ void replace_file_atomically(const std::filesystem::path& source, const FileIden
     }
     if (!same_regular_file_identity(target, source_identity)) {
         throw ErfError("Output replacement target does not match the verified temporary output: " + path_to_string(target));
+    }
+#elif defined(__EMSCRIPTEN__)
+    // MEMFS is process-local and single-threaded in the browser build. POSIX
+    // hard-link creation and directory fsync are desktop durability mechanisms,
+    // not browser persistence primitives. Rename the verified temp node inside
+    // the same virtual directory, then verify that the destination is that node.
+    std::error_code ec;
+    std::filesystem::rename(source, target, ec);
+    if (ec) {
+        throw ErfError("Unable to finalize browser archive output: " +
+                       path_to_string(target) + ": " + ec.message());
+    }
+    if (!same_regular_file_identity(target, source_identity)) {
+        throw ErfError("Browser archive output does not match the verified temporary output: " +
+                       path_to_string(target));
     }
 #else
     if (!target_state.identity.valid) {

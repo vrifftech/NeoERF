@@ -71,10 +71,14 @@ supported.
   archive entries and newly staged entries without blocking wxWidgets-WASM
   event dispatch. The host file is not modified in place; use **Save** to
   download the rebuilt archive after removal.
-- Extract, Save, and Export prepare a conspicuous **Download
-  &lt;filename&gt;** action above the editor. Click that normal browser link to
-  complete the transfer. The application does not open a native Save File
-  picker from inside wxWidgets-WASM event dispatch.
+- **Save** and **Save As** return from the originating wxWidgets-WASM event
+  before rebuilding the archive. The rebuild runs through the wx event queue,
+  then the finished bytes are copied into a conspicuous **Download
+  &lt;filename&gt;** action above the editor. **Save As** uses a nonmodal filename
+  dialog rather than a browser prompt or native Save File picker.
+- Extract and Export use the same persistent browser-download action. Click the
+  normal browser link to complete the transfer; the source host file is never
+  modified in place.
 - Non-path preferences use the port's wxConfig/localStorage backend. IDBFS is mounted for browser-owned files, while imported host-file paths are intentionally not persisted.
 - Automatic installed-game discovery is unavailable in the browser. Use the
   normal Open command and explicitly select required files.
