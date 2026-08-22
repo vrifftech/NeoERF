@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -383,6 +384,16 @@ public:
     }
 
     void insertResources(const std::vector<std::filesystem::path>& files) {
+#if defined(__EMSCRIPTEN__)
+        beginBrowserResourceImport(files);
+#else
+        insertResourcesSynchronously(files);
+#endif
+    }
+
+private:
+
+    void insertResourcesSynchronously(const std::vector<std::filesystem::path>& files) {
         if (!archive().loaded()) {
             return;
         }
@@ -398,6 +409,7 @@ public:
                     continue;
                 }
 
+                const std::uintmax_t size = std::filesystem::file_size(file);
                 const std::string ext = extensionNoDot(file);
                 std::uint16_t type = 0xFFFFu;
                 if (!ext.empty()) {
@@ -408,7 +420,7 @@ public:
                     continue;
                 }
 
-                const std::string leaf = file.filename().string();
+                const std::string leaf = neoerf::filename_string(file);
                 const bool exists = archive().filename_based_resources()
                     ? archive().resource_exists_by_name(leaf, true)
                     : archive().resource_exists(leaf, true);
@@ -425,16 +437,7 @@ public:
                     }
                 }
 
-                archive().add_resource(file, true);
-                std::string resref = neoerf::resource_stem_from_text(leaf);
-                if (!archive().filename_based_resources()) {
-                    resref = neoerf::string_to_resref(neoerf::ascii_lower(resref), archive().extended_resrefs());
-                    eraseStagedDisplayRow(resref, type);
-                    stagedRows().push_back(ResourceRow{resref, {}, extensionForType(type), type, std::filesystem::file_size(file), true});
-                } else {
-                    eraseStagedDisplayRow(leaf, type);
-                    stagedRows().push_back(ResourceRow{resref, leaf, ext, type, std::filesystem::file_size(file), true});
-                }
+                addResourceFromImportedPath(file, type, ext, size);
                 ++inserted;
             }
             refreshList();
@@ -450,7 +453,289 @@ public:
         setProgressVisible(false, 0);
     }
 
-private:
+    void addResourceFromImportedPath(const std::filesystem::path& file,
+                                     std::uint16_t type,
+                                     const std::string& extension,
+                                     std::uintmax_t size) {
+        archive().add_resource(file, true);
+        const std::string leaf = neoerf::filename_string(file);
+        std::string resref = neoerf::resource_stem_from_text(leaf);
+        if (!archive().filename_based_resources()) {
+            resref = neoerf::string_to_resref(
+                neoerf::ascii_lower(resref), archive().extended_resrefs());
+            eraseStagedDisplayRow(resref, type);
+            stagedRows().push_back(
+                ResourceRow{resref, {}, extensionForType(type), type, size, true});
+        } else {
+            eraseStagedDisplayRow(leaf, type);
+            stagedRows().push_back(
+                ResourceRow{resref, leaf, extension, type, size, true});
+        }
+    }
+
+#if defined(__EMSCRIPTEN__)
+    struct BrowserResourceImportBatch {
+        std::vector<std::filesystem::path> files;
+        std::size_t next = 0;
+        std::size_t inserted = 0;
+        std::size_t skipped = 0;
+        bool replaceAll = false;
+        bool replaceCurrent = false;
+        bool awaitingReplaceDecision = false;
+        bool cancelled = false;
+        wxWindow* documentPage = nullptr;
+        std::filesystem::path archivePath;
+        std::vector<std::string> errors;
+    };
+
+    void beginBrowserResourceImport(const std::vector<std::filesystem::path>& files) {
+        if (files.empty() || !archive().loaded()) {
+            return;
+        }
+        if (browserResourceImport_) {
+            setStatus(
+                "A resource import is already in progress.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+
+        auto batch = std::make_unique<BrowserResourceImportBatch>();
+        batch->files = files;
+        batch->documentPage = activeDocument().tabPage;
+        batch->archivePath = archive().filename();
+        browserResourceImport_ = std::move(batch);
+
+        setProgressVisible(true, files.size());
+        setStatus(
+            files.size() == 1 ? "Importing 1 resource..."
+                              : "Importing " + std::to_string(files.size()) + " resources...",
+            neoerf::filename_string(archive().filename()),
+            fileCountText());
+        updateUiState();
+        CallAfter([this]() { processNextBrowserResourceImport(); });
+    }
+
+    bool browserResourceImportStillTargetsActiveDocument() const {
+        return browserResourceImport_ &&
+               hasActiveDocument() &&
+               activeDocument().tabPage == browserResourceImport_->documentPage &&
+               archive().loaded() &&
+               archive().filename() == browserResourceImport_->archivePath;
+    }
+
+    void continueBrowserResourceImport() {
+        CallAfter([this]() { processNextBrowserResourceImport(); });
+    }
+
+    void processNextBrowserResourceImport() {
+        if (!browserResourceImport_ || IsBeingDeleted()) {
+            return;
+        }
+        if (!browserResourceImportStillTargetsActiveDocument()) {
+            finishBrowserResourceImport(
+                "Resource import stopped because the active archive changed.");
+            return;
+        }
+
+        auto& batch = *browserResourceImport_;
+        if (batch.awaitingReplaceDecision) {
+            return;
+        }
+        if (batch.cancelled || batch.next >= batch.files.size()) {
+            finishBrowserResourceImport({});
+            return;
+        }
+
+        const std::filesystem::path file = batch.files[batch.next];
+        gauge_->SetValue(static_cast<int>(batch.next + 1));
+        try {
+            const std::uintmax_t size = neoerf::regular_file_size_after_open(file);
+            const std::string extension = extensionNoDot(file);
+            std::uint16_t type = 0xFFFFu;
+            if (!extension.empty()) {
+                type = neoerf::Resource::string_to_res_type(extension, activeProfile());
+            }
+            if (type == 0xFFFFu && !archive().filename_based_resources()) {
+                throw std::runtime_error(
+                    "Unsupported resource type for this archive: " + neoerf::filename_string(file));
+            }
+
+            const std::string leaf = neoerf::filename_string(file);
+            const bool exists = archive().filename_based_resources()
+                ? archive().resource_exists_by_name(leaf, true)
+                : archive().resource_exists(leaf, true);
+            if (exists && !batch.replaceAll && !batch.replaceCurrent) {
+                showBrowserReplaceResourceDialog(leaf);
+                return;
+            }
+
+            addResourceFromImportedPath(file, type, extension, size);
+            ++batch.inserted;
+            ++batch.next;
+            batch.replaceCurrent = false;
+        } catch (const std::exception& ex) {
+            ++batch.skipped;
+            ++batch.next;
+            batch.replaceCurrent = false;
+            batch.errors.push_back(neoerf::filename_string(file) + ": " + ex.what());
+        }
+
+        continueBrowserResourceImport();
+    }
+
+    void showBrowserReplaceResourceDialog(const std::string& resourceName) {
+        if (!browserResourceImport_ || browserResourceImport_->awaitingReplaceDecision) {
+            return;
+        }
+        browserResourceImport_->awaitingReplaceDecision = true;
+
+        auto* dialog = new wxDialog(
+            this,
+            wxID_ANY,
+            "Replace Resource",
+            wxDefaultPosition,
+            wxDefaultSize,
+            wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        browserReplaceDialog_ = dialog;
+
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        auto* message = new wxStaticText(
+            dialog,
+            wxID_ANY,
+            wxui::toWx(
+                "The resource " + resourceName +
+                " already exists in this archive. Replace it?"));
+        message->Wrap(440);
+        root->Add(message, 0, wxEXPAND | wxALL, 14);
+
+        auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+        buttons->AddStretchSpacer(1);
+        auto* yes = new wxButton(dialog, wxID_YES, "Replace");
+        auto* yesAll = new wxButton(dialog, wxID_APPLY, "Replace all");
+        auto* no = new wxButton(dialog, wxID_NO, "Skip");
+        auto* cancel = new wxButton(dialog, wxID_CANCEL, "Cancel remaining");
+        buttons->Add(yes, 0, wxRIGHT, 6);
+        buttons->Add(yesAll, 0, wxRIGHT, 6);
+        buttons->Add(no, 0, wxRIGHT, 6);
+        buttons->Add(cancel, 0);
+        root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 14);
+
+        yes->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_YES);
+        });
+        yesAll->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_APPLY);
+        });
+        no->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_NO);
+        });
+        cancel->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_CANCEL);
+        });
+        dialog->Bind(wxEVT_CLOSE_WINDOW, [this, dialog](wxCloseEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_CANCEL);
+        });
+
+        dialog->SetSizerAndFit(root);
+        wxui::configureResponsiveWindow(*dialog, wxSize(580, 230), wxSize(420, 190));
+        wxui::applyTheme(dialog, darkMode_);
+        dialog->CentreOnParent();
+        wxui::constrainWindowToDisplay(*dialog);
+        dialog->Show();
+        dialog->Raise();
+    }
+
+    void resolveBrowserReplaceDecision(wxDialog* dialog, int answer) {
+        if (browserReplaceDialog_ != dialog) {
+            return;
+        }
+        browserReplaceDialog_ = nullptr;
+        dialog->Hide();
+        dialog->Destroy();
+
+        if (!browserResourceImport_) {
+            return;
+        }
+        auto& batch = *browserResourceImport_;
+        batch.awaitingReplaceDecision = false;
+        if (answer == wxID_YES) {
+            batch.replaceCurrent = true;
+        } else if (answer == wxID_APPLY) {
+            batch.replaceAll = true;
+        } else if (answer == wxID_NO) {
+            ++batch.skipped;
+            ++batch.next;
+            batch.errors.push_back("Skipped existing resource: " +
+                                   neoerf::filename_string(batch.files[batch.next - 1]));
+        } else {
+            batch.cancelled = true;
+        }
+        continueBrowserResourceImport();
+    }
+
+    void finishBrowserResourceImport(const std::string& fatalError) {
+        if (!browserResourceImport_) {
+            return;
+        }
+        if (browserReplaceDialog_ != nullptr) {
+            wxDialog* dialog = browserReplaceDialog_;
+            browserReplaceDialog_ = nullptr;
+            dialog->Hide();
+            dialog->Destroy();
+        }
+
+        std::unique_ptr<BrowserResourceImportBatch> completed =
+            std::move(browserResourceImport_);
+        setProgressVisible(false, 0);
+
+        if (hasActiveDocument() &&
+            activeDocument().tabPage == completed->documentPage &&
+            archive().loaded() &&
+            archive().filename() == completed->archivePath) {
+            refreshList();
+            updateUiState();
+            updateTitle();
+        }
+
+        std::string message;
+        if (!fatalError.empty()) {
+            message = fatalError;
+        } else if (completed->cancelled) {
+            message = "Resource import cancelled after staging " +
+                      std::to_string(completed->inserted) + ".";
+        } else if (completed->inserted == 0 && completed->skipped == 0) {
+            message = "No resources were selected.";
+        } else {
+            message = completed->inserted == 1
+                ? "1 resource staged. Use Save to download the modified archive."
+                : std::to_string(completed->inserted) +
+                      " resources staged. Use Save to download the modified archive.";
+            if (completed->skipped > 0) {
+                message += " " + std::to_string(completed->skipped) + " skipped.";
+            }
+        }
+
+        if (!completed->errors.empty()) {
+            message += " " + completed->errors.front();
+            if (completed->errors.size() > 1) {
+                message += " (" + std::to_string(completed->errors.size() - 1) +
+                           " more issue(s); see the browser console.)";
+            }
+            for (const auto& error : completed->errors) {
+                std::fprintf(stderr, "[NeoERF] Resource import: %s\n", error.c_str());
+            }
+        }
+
+        const std::string archiveName = hasActiveDocument() && archive().loaded()
+            ? neoerf::filename_string(archive().filename())
+            : std::string{};
+        setStatus(message, archiveName, hasActiveDocument() && archive().loaded()
+            ? fileCountText()
+            : std::string{});
+        updateUiState();
+    }
+#endif
 
     struct DocumentTab {
         std::unique_ptr<neoerf::ErfArchive> archive = std::make_unique<neoerf::ErfArchive>();
@@ -1073,7 +1358,9 @@ private:
 
     void updateProgress(std::size_t value) {
         gauge_->SetValue(static_cast<int>(value));
+#if !defined(__EMSCRIPTEN__)
         wxYieldIfNeeded();
+#endif
     }
 
     void updateTitle() {
@@ -1094,25 +1381,33 @@ private:
         if (GetMenuBar() != nullptr) {
             GetMenuBar()->Enable(id, enabled);
         }
+        if (wxWindow* control = FindWindow(id); control != nullptr) {
+            control->Enable(enabled);
+        }
     }
 
     void updateUiState() {
         const bool loaded = archive().loaded();
         const bool dirty = loaded && archive().dirty();
         const bool hasSelection = !selectedRows().empty();
+#if defined(__EMSCRIPTEN__)
+        const bool browserImportBusy = browserResourceImport_ != nullptr;
+#else
+        constexpr bool browserImportBusy = false;
+#endif
 
-        enableAction(ID_Save, dirty);
-        enableAction(ID_SaveAs, loaded);
+        enableAction(ID_Save, dirty && !browserImportBusy);
+        enableAction(ID_SaveAs, loaded && !browserImportBusy);
         const bool patcherArchive = loaded &&
             profile() == neoerf::ResourceNameProfile::KotOR &&
             !archive().filename_based_resources() &&
             !archive().extended_resrefs() &&
             (archive().disk_format() == neoerf::ArchiveDiskFormat::ErfV1 ||
              archive().disk_format() == neoerf::ArchiveDiskFormat::RimV1);
-        enableAction(ID_ExportArchivePatcher, patcherArchive);
-        enableAction(ID_Add, loaded);
+        enableAction(ID_ExportArchivePatcher, patcherArchive && !browserImportBusy);
+        enableAction(ID_Add, loaded && !browserImportBusy);
         enableAction(ID_CopyCells, loaded && hasSelection);
-        enableAction(ID_PasteCells, loaded);
+        enableAction(ID_PasteCells, loaded && !browserImportBusy);
         enableAction(ID_Filter, loaded);
         enableAction(ID_ClearFilter, loaded);
         enableAction(ID_FilterColumn, loaded && !displayRows_.empty());
@@ -1120,13 +1415,14 @@ private:
         enableAction(ID_ClearAllFilters, loaded && neoview::hasAnyFilter(viewState()));
         enableAction(ID_ResetColumnOrder, loaded);
         enableAction(ID_ResetRowOrder, loaded);
-        enableAction(ID_Extract, loaded && hasSelection);
-        enableAction(ID_Delete, loaded && hasSelection);
+        enableAction(ID_Extract, loaded && hasSelection && !browserImportBusy);
+        enableAction(ID_Delete, loaded && hasSelection && !browserImportBusy);
         enableAction(ID_Find, loaded && !displayRows_.empty());
         enableAction(ID_SelectAll, loaded && !displayRows_.empty());
         const int toolsIndex = GetMenuBar() ? GetMenuBar()->FindMenu("&Tools") : wxNOT_FOUND;
         if (toolsIndex != wxNOT_FOUND) {
-            GetMenuBar()->EnableTop(static_cast<std::size_t>(toolsIndex), loaded);
+            GetMenuBar()->EnableTop(
+                static_cast<std::size_t>(toolsIndex), loaded && !browserImportBusy);
         }
 
         if (filePath_) {
@@ -1134,9 +1430,9 @@ private:
             if (wxui::toStd(filePath_->GetValue()) != path) filePath_->ChangeValue(wxui::toWx(path));
         }
         if (filterText_) filterText_->Enable(loaded);
-        if (insertButton_) insertButton_->Enable(loaded);
-        if (extractButton_) extractButton_->Enable(loaded && hasSelection);
-        if (deleteButton_) deleteButton_->Enable(loaded && hasSelection);
+        if (insertButton_) insertButton_->Enable(loaded && !browserImportBusy);
+        if (extractButton_) extractButton_->Enable(loaded && hasSelection && !browserImportBusy);
+        if (deleteButton_) deleteButton_->Enable(loaded && hasSelection && !browserImportBusy);
         if (findButton_) findButton_->Enable(loaded && !displayRows_.empty());
     }
 
@@ -1518,6 +1814,39 @@ void onCopyCells(wxCommandEvent&) {
         if (!archive().loaded()) {
             return;
         }
+#if defined(__EMSCRIPTEN__)
+        if (browserResourceImport_) {
+            setStatus(
+                "A resource import is already in progress.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+        wxWindow* const targetPage = activeDocument().tabPage;
+        const std::filesystem::path targetArchive = archive().filename();
+        wxui::requestOpenFiles(
+            this,
+            "Add resources",
+            kAllFilesWildcard,
+            [this, targetPage, targetArchive](std::vector<std::filesystem::path> files) {
+                if (files.empty() || IsBeingDeleted()) return;
+                if (!hasActiveDocument() ||
+                    activeDocument().tabPage != targetPage ||
+                    !archive().loaded() ||
+                    archive().filename() != targetArchive) {
+                    setStatus(
+                        "Resources were not added because the active archive changed while the file picker was open.",
+                        hasActiveDocument() && archive().loaded()
+                            ? neoerf::filename_string(archive().filename())
+                            : std::string{},
+                        hasActiveDocument() && archive().loaded()
+                            ? fileCountText()
+                            : std::string{});
+                    return;
+                }
+                insertResources(files);
+            });
+#else
         wxui::requestOpenFiles(
             this,
             "Add resources",
@@ -1526,6 +1855,7 @@ void onCopyCells(wxCommandEvent&) {
                 if (files.empty() || IsBeingDeleted()) return;
                 insertResources(files);
             });
+#endif
     }
 
     void onExtract(wxCommandEvent&) {
@@ -1911,6 +2241,10 @@ void onCopyCells(wxCommandEvent&) {
     std::vector<DocumentTab> documents_;
     std::size_t activeDocumentIndex_ = neotabs::npos;
     bool tabSwitchInProgress_ = false;
+#if defined(__EMSCRIPTEN__)
+    std::unique_ptr<BrowserResourceImportBatch> browserResourceImport_;
+    wxDialog* browserReplaceDialog_ = nullptr;
+#endif
     std::vector<ResourceRow> displayRows_;
     int contextVisualColumn_ = 0;
     neoview::FontScaleWheelFilter fontScaleWheelFilter_;

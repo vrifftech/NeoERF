@@ -63,6 +63,10 @@ supported.
 - The existing wxWidgets menus, dialogs, grids, trees, notebooks, and custom
   drawing code are used through the DOM port.
 - File dialogs import explicit files into the Emscripten virtual filesystem.
+- **Add resources** accepts multiple host files and stages them into the active
+  archive through a nonblocking queue. Existing-resource decisions are shown
+  without suspending the browser event loop. After staging, use **Save** to
+  download the rebuilt archive.
 - Extract, Save, and Export prepare a conspicuous **Download
   &lt;filename&gt;** action above the editor. Click that normal browser link to
   complete the transfer. The application does not open a native Save File
