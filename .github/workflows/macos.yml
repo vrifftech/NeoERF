@@ -69,7 +69,7 @@ jobs:
           echo "CMAKE_PREFIX_PATH=$WX_PREFIX" >> "$GITHUB_ENV"
           "$WX_PREFIX/bin/wx-config" --version
 
-      - name: Build, test, and package NeoERF
+      - name: Build and package NeoERF
         working-directory: tool
         run: |
           bash ./scripts/build-macos.sh \

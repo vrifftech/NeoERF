@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       neoshared_ref:
-        description: neoshared branch, tag, or commit SHA
+        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
         required: false
         type: string
 
@@ -41,10 +41,11 @@ jobs:
       - name: Check out neoshared
         uses: actions/checkout@v7
         with:
-          repository: vrifftech/NeoShared
+          repository: vrifftech/neoshared
           ref: ${{ env.NEOSHARED_REF }}
           path: neoshared
           persist-credentials: false
+
 
       - name: Install build prerequisites
         run: |

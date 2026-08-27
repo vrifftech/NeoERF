@@ -19,6 +19,7 @@
 #include <wx/iconbndl.h>
 #include <wx/listctrl.h>
 #include <wx/sizer.h>
+#include <wx/weakref.h>
 #include <wx/wx.h>
 #include <wx/version.h>
 
@@ -38,6 +39,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#if defined(__EMSCRIPTEN__)
+#include <neoshared/wasm_dialog_compat.h>
+#endif
 
 static_assert(wxui::kPatcherExportUiApiVersion >= 4u,
               "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
@@ -242,21 +247,11 @@ std::string tableCell(const std::vector<std::string>& row, std::size_t index) {
 }
 
 std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent, const std::string& title) {
-#if defined(__EMSCRIPTEN__)
-    (void)title;
-    wxMessageBox(
-        "Multi-resource extraction to a writable directory is unavailable in the browser build. The Extract command can download one selected existing resource at a time. Use a desktop build for multi-resource or directory-wide extraction.",
-        "Extraction Unavailable",
-        wxOK | wxICON_INFORMATION,
-        parent);
-    return std::nullopt;
-#else
     wxDirDialog dialog(parent, wxui::toWx(title), wxEmptyString, wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
     if (dialog.ShowModal() != wxID_OK) {
         return std::nullopt;
     }
     return std::filesystem::path(wxui::toStd(dialog.GetPath()));
-#endif
 }
 
 int showReplaceResourceDialog(wxWindow* parent, const std::string& resourceName, bool darkMode) {
@@ -1371,31 +1366,37 @@ private:
                 fileCountText());
             updateUiState();
 
+            wxWeakRef<NeoERFFrame> weakThis(this);
             neobrowser::requestPackageWorkspace(
                 browserPatcherExport_->output.browserDirectorySession,
                 browserPatcherExport_->output.browserIniPath,
                 browserPatcherExport_->relativeFiles,
-                [this](neobrowser::PackageWorkspaceResult workspace) {
-                    if (IsBeingDeleted() || !browserPatcherExport_) return;
+                [weakThis](neobrowser::PackageWorkspaceResult workspace) mutable {
+                    if (!weakThis) return;
+                    NeoERFFrame* frame = weakThis.get();
+                    if (frame->IsBeingDeleted() || !frame->browserPatcherExport_) return;
                     if (!workspace.error.empty()) {
-                        finishBrowserPatcherExport(workspace.error, std::nullopt);
+                        frame->finishBrowserPatcherExport(workspace.error, std::nullopt);
                         return;
                     }
-                    if (!browserPatcherExportStillTargetsActiveDocument()) {
-                        finishBrowserPatcherExport(
+                    if (!frame->browserPatcherExportStillTargetsActiveDocument()) {
+                        frame->finishBrowserPatcherExport(
                             "Patcher export was cancelled because the active archive changed.",
                             std::nullopt);
                         return;
                     }
-                    browserPatcherExport_->workspaceRoot = std::move(workspace.workspaceRoot);
-                    browserPatcherExport_->workspaceIni = std::move(workspace.iniPath);
-                    browserPatcherExport_->iniExisted = workspace.iniExisted;
-                    updateProgress(2);
-                    setStatus(
+                    frame->browserPatcherExport_->workspaceRoot = std::move(workspace.workspaceRoot);
+                    frame->browserPatcherExport_->workspaceIni = std::move(workspace.iniPath);
+                    frame->browserPatcherExport_->iniExisted = workspace.iniExisted;
+                    frame->updateProgress(2);
+                    frame->setStatus(
                         "Generating installer instructions and archive payloads...",
-                        neoerf::filename_string(archive().filename()),
-                        fileCountText());
-                    CallAfter([this]() { processBrowserPatcherExport(); });
+                        neoerf::filename_string(frame->archive().filename()),
+                        frame->fileCountText());
+                    frame->CallAfter([weakThis]() mutable {
+                        if (!weakThis) return;
+                        weakThis->processBrowserPatcherExport();
+                    });
                 });
         } catch (const std::exception& exception) {
             setProgressVisible(false, 0);
@@ -1425,18 +1426,21 @@ private:
                 "Committing payloads and the selected installer INI...",
                 neoerf::filename_string(archive().filename()),
                 fileCountText());
+            wxWeakRef<NeoERFFrame> weakThis(this);
             neobrowser::requestCommitPackageWorkspace(
                 browserPatcherExport_->output.browserDirectorySession,
                 browserPatcherExport_->workspaceRoot,
                 browserPatcherExport_->output.browserIniPath,
                 browserPatcherExport_->relativeFiles,
-                [this](neobrowser::PackageCommitResult result) {
-                    if (IsBeingDeleted() || !browserPatcherExport_) return;
+                [weakThis](neobrowser::PackageCommitResult result) mutable {
+                    if (!weakThis) return;
+                    NeoERFFrame* frame = weakThis.get();
+                    if (frame->IsBeingDeleted() || !frame->browserPatcherExport_) return;
                     if (!result.error.empty()) {
-                        finishBrowserPatcherExport(result.error, std::nullopt);
+                        frame->finishBrowserPatcherExport(result.error, std::nullopt);
                         return;
                     }
-                    finishBrowserPatcherExport({}, result);
+                    frame->finishBrowserPatcherExport({}, result);
                 });
         } catch (const std::exception& exception) {
             finishBrowserPatcherExport(exception.what(), std::nullopt);
@@ -2547,13 +2551,33 @@ void onCopyCells(wxCommandEvent&) {
                     "NeoERF patcher export supports KotOR/KotOR II ERF, RIM, and MOD archives with 16-byte ResRefs only.");
             }
 
+            wxWeakRef<NeoERFFrame> weakThis(this);
+            wxWeakRef<wxWindow> targetPage(activeDocument().tabPage);
+            neoerf::ErfArchive* const targetArchiveObject = activeDocument().archive.get();
+            const std::filesystem::path targetArchivePath = archive().filename();
             wxui::requestOpenFile(
                 this,
                 "Select the clean original archive",
                 kArchiveWildcard,
-                [this](std::optional<std::filesystem::path> originalPath) {
-                    if (!originalPath || IsBeingDeleted()) return;
-                    exportArchivePatcherFromOriginal(*originalPath);
+                [weakThis, targetPage, targetArchiveObject, targetArchivePath](
+                    std::optional<std::filesystem::path> originalPath) {
+                    if (!originalPath || !weakThis || !targetPage) return;
+                    NeoERFFrame* frame = weakThis.get();
+                    if (frame->IsBeingDeleted()) return;
+                    if (!frame->hasActiveDocument() ||
+                        frame->activeDocument().tabPage != targetPage.get() ||
+                        frame->activeDocument().archive.get() != targetArchiveObject ||
+                        !frame->archive().loaded() ||
+                        frame->archive().filename() != targetArchivePath) {
+                        if (frame->hasActiveDocument() && frame->archive().loaded()) {
+                            frame->setStatus(
+                                "Patcher export was cancelled because the initiating archive is no longer active.",
+                                neoerf::filename_string(frame->archive().filename()),
+                                frame->fileCountText());
+                        }
+                        return;
+                    }
+                    frame->exportArchivePatcherFromOriginal(*originalPath);
                 });
         } catch (const std::exception& ex) {
             wxui::showError(this, ex);
@@ -2649,18 +2673,22 @@ void onCopyCells(wxCommandEvent&) {
             // handlers through a synchronous ccall; doing filesystem durability
             // work or opening a native save picker in that chain can strand its
             // event-dispatch interlock and make the whole application appear frozen.
+            wxWeakRef<NeoERFFrame> weakThis(this);
             wxTheApp->CallAfter(
-                [this, row, filenameBased, outputName, archiveName, activeArchive]() {
-                    if (IsBeingDeleted()) return;
+                [weakThis, row, filenameBased, outputName, archiveName, activeArchive]() mutable {
+                    if (!weakThis) return;
+                    NeoERFFrame* frame = weakThis.get();
+                    if (frame->IsBeingDeleted()) return;
                     try {
-                        if (!archive().loaded() || archive().filename() != activeArchive) {
+                        if (!frame->archive().loaded() ||
+                            frame->archive().filename() != activeArchive) {
                             throw std::runtime_error(
                                 "The active archive changed before extraction completed. Select the resource again.");
                         }
 
                         std::vector<std::uint8_t> bytes = filenameBased
-                            ? archive().read_resource_by_name(row.filename())
-                            : archive().read_resource(row.resref, row.restype);
+                            ? frame->archive().read_resource_by_name(row.filename())
+                            : frame->archive().read_resource(row.resref, row.restype);
                         if (!neobrowser::prepareDownloadBytes(
                                 bytes.empty() ? nullptr : bytes.data(),
                                 bytes.size(),
@@ -2669,15 +2697,18 @@ void onCopyCells(wxCommandEvent&) {
                                 "The browser could not prepare the extracted resource for download.");
                         }
 
-                        setStatus(
+                        frame->setStatus(
                             "Resource ready. Use the Download " + outputName +
                                 " action shown above the editor.",
                             archiveName,
-                            fileCountText());
+                            frame->fileCountText());
                     } catch (const std::exception& ex) {
-                        if (IsBeingDeleted()) return;
-                        setStatus("Resource extraction failed.", archiveName, fileCountText());
-                        wxui::showError(this, ex);
+                        if (!weakThis || frame->IsBeingDeleted()) return;
+                        frame->setStatus(
+                            "Resource extraction failed.",
+                            archiveName,
+                            frame->fileCountText());
+                        wxui::showError(frame, ex);
                     }
                 });
             return;
