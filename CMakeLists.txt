@@ -218,7 +218,10 @@ if(NEOERF_BUILD_WX_GUI)
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.svg"
         )
         target_link_libraries(NeoERF PRIVATE neoerf_core neoerf_patcher)
-        target_include_directories(NeoERF PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
+        target_include_directories(NeoERF PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/resources
+            ${NEOSHARED_ROOT}/include
+        )
         target_link_libraries(NeoERF PRIVATE neoshared::wx)
         neoerf_link_wx(NeoERF)
         target_compile_features(NeoERF PRIVATE cxx_std_17)
