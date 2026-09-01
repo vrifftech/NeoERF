@@ -27,4 +27,4 @@ bash "$NEOSHARED_ROOT_VALUE/scripts/build-wasm-app.sh" \
   --option-prefix "NEOERF" \
   --cli-option "NEOERF_BUILD_CLI" \
   --icon "resources/neoerf.svg" \
-  "${forward[@]}"
+  "${forward[@]+"${forward[@]}"}"

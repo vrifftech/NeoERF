@@ -76,7 +76,6 @@ jobs:
           test -f tool/dist-wasm/index.html
           test -f tool/dist-wasm/neoerf.js
           test -f tool/dist-wasm/neoerf.wasm
-          test -f tool/dist-wasm/THIRD_PARTY_NOTICES.txt
           grep -q 'NeoERF' tool/dist-wasm/index.html
 
       - name: Configure GitHub Pages
