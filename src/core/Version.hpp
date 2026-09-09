@@ -1,6 +1,6 @@
 #pragma once
 
-#define NEOERF_VERSION_STRING "1.1.0"
+#define NEOERF_VERSION_STRING "1.1.1"
 
 namespace neoerf {
 

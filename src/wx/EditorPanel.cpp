@@ -1,0 +1,3143 @@
+#include "ERFEditorPanel.hpp"
+#include "erf/ErfPatcher.hpp"
+#include "erf/Utils.hpp"
+#include "core/Version.hpp"
+#include "wx_ui.hpp"
+#include "NeoGameDirectoryMenu.hpp"
+#include "NeoDocumentTabs.hpp"
+#include "NeoSettings.hpp"
+#include "NeoPatcherExport.hpp"
+#include "NeoViewState.hpp"
+
+
+#include <wx/aui/auibook.h>
+#include <wx/clipbrd.h>
+#include <wx/dnd.h>
+#include <wx/fdrepdlg.h>
+#include <wx/gauge.h>
+#include <wx/icon.h>
+#include <wx/iconbndl.h>
+#include <wx/listctrl.h>
+#include <wx/sizer.h>
+#include <wx/weakref.h>
+#include <wx/wx.h>
+#include <wx/version.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <system_error>
+#include <string>
+#include <utility>
+#include <vector>
+
+#if defined(__EMSCRIPTEN__)
+#include <neoshared/wasm_dialog_compat.h>
+#endif
+
+static_assert(wxui::kPatcherExportUiApiVersion >= 4u,
+              "NeoERF requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
+#if defined(__EMSCRIPTEN__)
+static_assert(neobrowser::kBrowserFileApiVersion >= 6u,
+              "NeoERF WebAssembly requires browser archive and installer-package APIs from the current neoshared checkout.");
+static_assert(neosettings::kRecentFilesApiVersion >= 1u,
+              "NeoERF WebAssembly requires session-safe recent-file support from the current neoshared checkout.");
+#endif
+
+namespace {
+
+constexpr const char* kAppName = "NeoERF";
+constexpr const char* kArchiveWildcard =
+    "All supported archives (*.erf;*.rim;*.rimp;*.crf;*.mod;*.sav;*.nwm;*.hak)|*.erf;*.rim;*.rimp;*.crf;*.mod;*.sav;*.nwm;*.hak|"
+    "ERF/CRF file (*.erf;*.crf)|*.erf;*.crf|"
+    "Resource Image file (*.rim)|*.rim|"
+    "Patch resource image file (*.rimp)|*.rimp|"
+    "Module file (*.mod)|*.mod|"
+    "Savegame file (*.sav)|*.sav|"
+    "NWN module file (*.nwm)|*.nwm|"
+    "Hak file (*.hak)|*.hak|"
+    "All files (*.*)|*.*";
+constexpr const char* kAllFilesWildcard = "All files (*.*)|*.*";
+std::string extensionNoDot(const std::filesystem::path& path) {
+    std::string ext = neoerf::extension_string(path);
+    if (!ext.empty() && ext.front() == '.') {
+        ext.erase(ext.begin());
+    }
+    return neoerf::ascii_lower(ext);
+}
+
+#if defined(__EMSCRIPTEN__)
+std::vector<std::uint8_t> readBrowserDownloadBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) {
+        throw std::runtime_error("Unable to open the rebuilt archive for browser download: " +
+                                 neoerf::path_to_string(path));
+    }
+
+    const std::streamoff end = static_cast<std::streamoff>(input.tellg());
+    if (end < 0) {
+        throw std::runtime_error("Unable to determine the rebuilt archive size: " +
+                                 neoerf::path_to_string(path));
+    }
+    const auto byteCount = static_cast<std::uintmax_t>(end);
+    if (byteCount > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max()) ||
+        byteCount > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
+        throw std::runtime_error("The rebuilt archive is too large for this browser build.");
+    }
+
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(byteCount));
+    input.seekg(0, std::ios::beg);
+    if (!bytes.empty()) {
+        input.read(reinterpret_cast<char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        if (!input) {
+            throw std::runtime_error("Unable to read the rebuilt archive for browser download: " +
+                                     neoerf::path_to_string(path));
+        }
+    }
+    return bytes;
+}
+
+std::string browserArchiveNameWithExtension(const std::filesystem::path& currentArchive,
+                                            std::string requestedName) {
+    while (!requestedName.empty() &&
+           std::isspace(static_cast<unsigned char>(requestedName.front())) != 0) {
+        requestedName.erase(requestedName.begin());
+    }
+    while (!requestedName.empty() &&
+           std::isspace(static_cast<unsigned char>(requestedName.back())) != 0) {
+        requestedName.pop_back();
+    }
+    if (requestedName.empty()) {
+        requestedName = neoerf::filename_string(currentArchive);
+    }
+    if (requestedName.empty()) {
+        requestedName = "archive.erf";
+    }
+
+    std::filesystem::path requestedPath(requestedName);
+    if (requestedPath.extension().empty() && !currentArchive.extension().empty()) {
+        requestedName += neoerf::extension_string(currentArchive);
+    }
+    return requestedName;
+}
+#endif
+
+std::string formatSize(std::uintmax_t bytes) {
+    if (bytes == 1) {
+        return "1 byte";
+    }
+    if (bytes < 1024) {
+        return std::to_string(bytes) + " bytes";
+    }
+    std::ostringstream out;
+    out.setf(std::ios::fixed, std::ios::floatfield);
+    if (bytes < 1024 * 1024) {
+        out.precision(1);
+        out << (static_cast<double>(bytes) / 1024.0) << " kB";
+    } else {
+        out.precision(2);
+        out << (static_cast<double>(bytes) / (1024.0 * 1024.0)) << " MB";
+    }
+    return out.str();
+}
+
+std::string resourceColumnLabel(std::size_t column) {
+    switch (column) {
+        case 0: return "Resref";
+        case 1: return "Type";
+        case 2: return "Size";
+        default: return "Column " + std::to_string(column);
+    }
+}
+
+
+std::string lowerAsciiLocal(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+struct Table {
+    std::vector<std::string> columns;
+    std::vector<std::vector<std::string>> rows;
+};
+
+constexpr int kRecentFileBaseId = wxID_HIGHEST + 18500;
+constexpr int kClearRecentFilesId = kRecentFileBaseId + neosettings::kMaxRecentFiles;
+
+bool rowMatches(const Table& table, const std::vector<std::string>& row, const std::string& term) {
+    if (term.empty()) return true;
+    const std::string needle = lowerAsciiLocal(term);
+    for (const auto& column : table.columns) {
+        if (lowerAsciiLocal(column).find(needle) != std::string::npos) return true;
+    }
+    for (const auto& cell : row) {
+        if (lowerAsciiLocal(cell).find(needle) != std::string::npos) return true;
+    }
+    return false;
+}
+
+std::vector<std::string> splitLine(const std::string& line, char delimiter) {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    for (;;) {
+        const std::size_t pos = line.find(delimiter, start);
+        if (pos == std::string::npos) {
+            out.push_back(line.substr(start));
+            break;
+        }
+        out.push_back(line.substr(start, pos - start));
+        start = pos + 1;
+    }
+    return out;
+}
+
+Table parseClipboardTable(const std::string& text) {
+    Table table;
+    std::istringstream in(text);
+    std::string line;
+    if (!std::getline(in, line)) return table;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    table.columns = splitLine(line, '\t');
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        table.rows.push_back(splitLine(line, '\t'));
+    }
+    return table;
+}
+
+std::string serializeClipboardTable(const Table& table) {
+    std::ostringstream out;
+    for (std::size_t i = 0; i < table.columns.size(); ++i) {
+        if (i) out << '\t';
+        out << table.columns[i];
+    }
+    out << '\n';
+    for (const auto& row : table.rows) {
+        for (std::size_t i = 0; i < table.columns.size(); ++i) {
+            if (i) out << '\t';
+            if (i < row.size()) out << row[i];
+        }
+        out << '\n';
+    }
+    return out.str();
+}
+
+std::size_t optionalColumn(const Table& table, const std::string& name) {
+    const auto want = lowerAsciiLocal(name);
+    for (std::size_t i = 0; i < table.columns.size(); ++i) {
+        if (lowerAsciiLocal(table.columns[i]) == want) return i;
+    }
+    return table.columns.size();
+}
+
+std::string tableCell(const std::vector<std::string>& row, std::size_t index) {
+    return index < row.size() ? row[index] : std::string();
+}
+
+std::optional<std::filesystem::path> chooseDirectory(wxWindow* parent, const std::string& title) {
+    wxDirDialog dialog(parent, wxui::toWx(title), wxEmptyString, wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
+    if (dialog.ShowModal() != wxID_OK) {
+        return std::nullopt;
+    }
+    return std::filesystem::path(wxui::toStd(dialog.GetPath()));
+}
+
+int showReplaceResourceDialog(wxWindow* parent, const std::string& resourceName, bool darkMode) {
+    wxDialog dialog(parent, wxID_ANY, "Replace Resource", wxDefaultPosition, wxDefaultSize,
+                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    auto* root = new wxBoxSizer(wxVERTICAL);
+    auto* message = new wxStaticText(&dialog, wxID_ANY,
+                                     wxui::toWx("The resource " + resourceName + " already exists in this archive.\nDo you wish to replace it?"));
+    message->Wrap(440);
+    root->Add(message, 0, wxEXPAND | wxALL, 14);
+
+    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+    buttons->AddStretchSpacer(1);
+    auto* yes = new wxButton(&dialog, wxID_YES, "Yes");
+    auto* yesAll = new wxButton(&dialog, wxID_APPLY, "Yes to all");
+    auto* no = new wxButton(&dialog, wxID_NO, "No");
+    auto* cancel = new wxButton(&dialog, wxID_CANCEL, "Cancel");
+    buttons->Add(yes, 0, wxRIGHT, 6);
+    buttons->Add(yesAll, 0, wxRIGHT, 6);
+    buttons->Add(no, 0, wxRIGHT, 6);
+    buttons->Add(cancel, 0);
+    root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 14);
+
+    yes->Bind(wxEVT_BUTTON, [&dialog](wxCommandEvent&) { dialog.EndModal(wxID_YES); });
+    yesAll->Bind(wxEVT_BUTTON, [&dialog](wxCommandEvent&) { dialog.EndModal(wxID_APPLY); });
+    no->Bind(wxEVT_BUTTON, [&dialog](wxCommandEvent&) { dialog.EndModal(wxID_NO); });
+    cancel->Bind(wxEVT_BUTTON, [&dialog](wxCommandEvent&) { dialog.EndModal(wxID_CANCEL); });
+
+    dialog.SetSizerAndFit(root);
+    wxui::configureResponsiveWindow(dialog, wxSize(560, 240), wxSize(420, 200));
+    wxui::applyTheme(&dialog, darkMode);
+    dialog.CentreOnParent();
+    wxui::constrainWindowToDisplay(dialog);
+    return dialog.ShowModal();
+}
+
+struct ResourceRow {
+    std::string resref;
+    std::string archiveName;
+    std::string extension;
+    std::uint16_t restype = 0xFFFF;
+    std::uintmax_t size = 0;
+    bool staged = false;
+
+    std::string displayResRef() const {
+        const std::string name = archiveName.empty() ? resref : archiveName;
+        return staged ? name + "*" : name;
+    }
+    std::string filename() const { return archiveName.empty() ? (resref + "." + extension) : archiveName; }
+};
+
+class NeoERFPanelImpl;
+
+class FileDropTarget final : public wxFileDropTarget {
+public:
+    explicit FileDropTarget(NeoERFPanelImpl* frame) : frame_(frame) {}
+    bool OnDropFiles(wxCoord, wxCoord, const wxArrayString& filenames) override;
+private:
+    NeoERFPanelImpl* frame_ = nullptr;
+};
+
+enum : int {
+    ID_New = wxID_HIGHEST + 18000,
+    ID_Open,
+    ID_Save,
+    ID_SaveAs,
+    ID_ExportArchivePatcher,
+    ID_CloseTab,
+    ID_CloseOtherTabs,
+    ID_NextTab,
+    ID_PreviousTab,
+    ID_DocumentTabs,
+    ID_Quit,
+    ID_Add,
+    ID_Extract,
+    ID_Delete,
+    ID_Find,
+    ID_SelectAll,
+    ID_CopyCells,
+    ID_PasteCells,
+    ID_Filter,
+    ID_ClearFilter,
+    ID_FilterColumn,
+    ID_ClearColumnFilter,
+    ID_ClearAllFilters,
+    ID_ResetColumnOrder,
+    ID_ResetRowOrder,
+    ID_DarkMode,
+    ID_FontIncrease,
+    ID_FontDecrease,
+    ID_FontReset,
+    ID_ProfileKotOR,
+    ID_ProfileJade,
+    ID_ProfileNWN,
+    ID_ProfileNWN2,
+    ID_ProfileWitcher,
+    ID_ProfileDAO,
+    ID_ProfileDA2,
+    ID_ResourceList,
+    ID_About,
+    ID_OpenMember,
+    ID_ExtractAll,
+    ID_OpenWithFirst,
+    ID_OpenWithLast = ID_OpenWithFirst + 15
+};
+
+class NeoERFPanelImpl final : public neoerf::ui::ERFEditorPanel {
+public:
+    NeoERFPanelImpl(wxWindow* parent, neomodules::Context context)
+        : ERFEditorPanel(parent, std::move(context)) {
+        buildMenus();
+        buildLayout();
+        bindEvents();
+        createDocumentTab(true);
+        archive().set_resource_type_profile(profile());
+        closeArchive(false);
+        darkMode_ = wxui::readDarkMode(kAppName);
+        fontScale_ = settings_.fontScale();
+        if (!context_.embedded) fontScaleWheelFilter_.attach(this, [this](int steps) { changeFontScaleSteps(steps); });
+        neoview::bindFontScaleDpiRefresh(this, [this]() { applyFontScale(); });
+        applyDarkMode();
+        applyResourceProfileMenu();
+        SetDropTarget(new FileDropTarget(this));
+    }
+
+    void rebuildRecentFilesMenu() {
+        if (recentFilesMenu_ != nullptr) {
+            neosettings::populateRecentFilesMenu(*recentFilesMenu_, settings_, kRecentFileBaseId, kClearRecentFilesId);
+        }
+    }
+
+    void rememberRecentFile(const std::filesystem::path& path) {
+        settings_.addRecentFile(path);
+        rebuildRecentFilesMenu();
+    }
+
+    void onOpenRecent(wxCommandEvent& event) {
+        const int index = event.GetId() - kRecentFileBaseId;
+        const auto files = settings_.recentFiles();
+        if (index < 0 || static_cast<std::size_t>(index) >= files.size()) return;
+        const std::filesystem::path file = files[static_cast<std::size_t>(index)];
+#if defined(__EMSCRIPTEN__)
+        // wxWidgets-WASM enters menu handlers through a synchronous browser
+        // dispatch. Reopen only after that dispatch has unwound so parsing a
+        // large archive cannot strand the menu-event interlock.
+        CallAfter([this, file]() {
+            if (IsBeingDeleted()) return;
+            if (!std::filesystem::exists(file)) {
+                settings_.removeRecentFile(file);
+                rebuildRecentFilesMenu();
+                wxui::showMessage(this, "Recent File Missing",
+                                  "This browser-session copy is no longer available:\n" +
+                                      file.filename().string());
+                return;
+            }
+            try{openArchive(file,true);}catch(const std::exception& ex){wxui::showError(this,ex);}
+        });
+#else
+        if (!std::filesystem::exists(file)) {
+            settings_.removeRecentFile(file);
+            rebuildRecentFilesMenu();
+            wxui::showMessage(this, "Recent File Missing", "Recent file no longer exists:\n" + file.string());
+            return;
+        }
+        try{openArchive(file,true);}catch(const std::exception& ex){wxui::showError(this,ex);}
+#endif
+    }
+
+    void onClearRecentFiles(wxCommandEvent&) {
+        settings_.clearRecentFiles();
+        rebuildRecentFilesMenu();
+    }
+
+    bool activateResource(const std::string& identity) override {
+        if(identity.empty())return false;
+        for(std::size_t i=0;i<documents_.size();++i)
+            if(documents_[i].model.identity()==identity){selectDocumentTab(i);return true;}
+        return false;
+    }
+    std::size_t documentCount() const override {return documents_.size();}
+    neoerf::ArchiveDocument* activeDocumentModel() override {return hasActiveDocument()?&activeDocument().model:nullptr;}
+    void refreshActiveDocument() override {refreshList();updateUiState();updateTitle();}
+    void setAppearance(bool dark,double scale) override {darkMode_=dark;fontScale_=scale;applyDarkMode();}
+    bool canClose() override {
+#if defined(__EMSCRIPTEN__)
+        if(browserArchiveSave_||browserResourceImport_||browserResourceDelete_||browserPatcherExport_)return false;
+#endif
+        return confirmCloseAllTabs();
+    }
+    std::vector<std::filesystem::path> openPaths() const override {
+        std::vector<std::filesystem::path> result;
+        for(const auto& doc:documents_){
+            if(!doc.model.path().empty())result.push_back(doc.model.path());
+            const auto staged=doc.model.archive().staged_input_paths();result.insert(result.end(),staged.begin(),staged.end());
+        }
+        return result;
+    }
+    bool openFile(const std::filesystem::path& path) override {return openArchive(path);}
+    bool openGameArchive(const std::filesystem::path& path,std::vector<std::filesystem::path> inputs) override {
+        const auto canonical=std::filesystem::weakly_canonical(std::filesystem::absolute(path));
+        if(activateResource("archive:"+canonical.generic_u8string())) {
+            inputs.push_back(canonical);activeDocument().model.protectSource(std::move(inputs));refreshActiveDocument();return true;
+        }
+        neoerf::ArchiveDocument candidate;candidate.open(path,true,std::move(inputs),profile());
+        installDocument(std::move(candidate));return true;
+    }
+    bool openResource(neoshared::ResourceDocument resource) override {
+        if(activateResource(resource.identity))return true;
+        neoerf::ArchiveDocument candidate;candidate.openResource(std::move(resource),profile());
+        installDocument(std::move(candidate));return true;
+    }
+    bool newArchive(const std::filesystem::path& path,neoerf::ArchiveType type) override {
+        checkDestination(path,true);
+        neoerf::ArchiveDocument candidate;candidate.create(path,type,profile());
+        installDocument(std::move(candidate));return true;
+    }
+    bool saveActiveAs(const std::filesystem::path& path) override {
+        if(!archive().loaded())return false;
+        checkDestination(path);
+        activeDocument().model.save(path);stagedRows().clear();refreshActiveDocument();
+        rememberRecentFile(archive().filename());return true;
+    }
+    void setMemberOpenHandler(neoerf::ui::MemberOpenHandler handler) override {memberOpen_=std::move(handler);}
+    bool openMember(const std::string& name,std::uint16_t type,const std::string& editor={}) override {
+        if(!memberOpen_.targets||!memberOpen_.open||!archive().loaded())return false;
+        const auto choices=memberOpen_.targets(type);if(choices.empty())return false;
+        const auto target=editor.empty()?choices.front().id:editor;
+        if(std::none_of(choices.begin(),choices.end(),[&](const auto& c){return c.id==target;}))return false;
+        auto resource=activeDocument().model.member(name,type);
+        memberOpen_.open(std::move(resource),target);return true;
+    }
+    bool openArchive(const std::filesystem::path& file,bool askBeforeDiscard=true,
+                     std::optional<neoerf::ResourceNameProfile> requestedProfile=std::nullopt) {
+        (void)askBeforeDiscard;
+        const auto canonical=std::filesystem::weakly_canonical(std::filesystem::absolute(file));
+        // Open of a previously saved working path must not duplicate its source tab.
+        for(std::size_t i=0;i<documents_.size();++i)
+            if(neoshared::sameResourcePath(documents_[i].model.path(),canonical)) {selectDocumentTab(i);return true;}
+        if(activateResource("archive:"+canonical.generic_u8string()))return true;
+        neoerf::ArchiveDocument candidate;candidate.open(canonical,false,{},requestedProfile.value_or(profile()));
+        installDocument(std::move(candidate));rememberRecentFile(canonical);neogames::resolver().inferFromOpenedPath(canonical);return true;
+    }
+
+    void selectResourceProfile(neoerf::ResourceNameProfile profile) override {
+        setResourceProfile(profile);
+    }
+
+    void insertResources(const std::vector<std::filesystem::path>& files) override {
+#if defined(__EMSCRIPTEN__)
+        beginBrowserResourceImport(files);
+#else
+        insertResourcesSynchronously(files);
+#endif
+    }
+
+private:
+
+    void installDocument(neoerf::ArchiveDocument candidate) {
+        ensureDocumentTabForOpen();auto& doc=activeDocument();doc.model=std::move(candidate);
+        profile()=archive().resource_type_profile();stagedRows().clear();viewState().resetForNewDocument();
+        viewState().sortColumn=0;viewState().sortAscending=true;
+        if(filterText_)filterText_->ChangeValue(wxString{});
+        applyResourceProfileMenu();refreshActiveDocument();
+        setStatus(doc.model.detached()?"Game/archive snapshot. Save As creates a working archive.":"Archive loaded.",doc.model.sourceDescription(),fileCountText());
+    }
+    void checkDestination(const std::filesystem::path& path,bool exporting=false) const {
+        validateHostOutput(path);
+        for(const auto& doc:documents_){
+            neoshared::checkResourceOutput(path,doc.model.protectedInputs());
+            neoshared::checkResourceOutput(path,doc.model.archive().staged_input_paths());
+            if((exporting||&doc!=&activeDocument())&&neoshared::sameResourcePath(path,doc.model.path()))
+                throw std::runtime_error("That destination belongs to an open archive. Choose a separate working file.");
+        }
+    }
+    void onOpenSelectedMember(wxCommandEvent&) {
+        try {
+            const auto selection=selectedRows();
+            for(const auto visual:selection) {
+                const auto index=list_->GetItemData(visual);if(index>=displayRows_.size())continue;
+                const auto row=displayRows_[index];openMember(row.filename(),row.restype);
+            }
+        }catch(const std::exception& ex){wxui::showError(this,ex);}
+    }
+    void onOpenWithMember(wxCommandEvent& event) {
+        try {
+            const auto i=static_cast<std::size_t>(event.GetId()-ID_OpenWithFirst);
+            if(!contextMember_||i>=memberChoices_.size())return;
+            const auto row=*contextMember_;openMember(row.filename(),row.restype,memberChoices_[i].id);
+        }catch(const std::exception& ex){wxui::showError(this,ex);}
+    }
+    void insertResourcesSynchronously(const std::vector<std::filesystem::path>& files) {
+        if (!archive().loaded()) {
+            return;
+        }
+        std::size_t inserted = 0;
+        bool yesToAll = false;
+        setProgressVisible(true, files.size());
+        try {
+            for (std::size_t i = 0; i < files.size(); ++i) {
+                updateProgress(i + 1);
+                const auto& file = files[i];
+                if (!std::filesystem::is_regular_file(file)) {
+                    wxui::showMessage(this, "Unable to add file", "Unable to add file: " + file.string());
+                    continue;
+                }
+
+                const std::uintmax_t size = std::filesystem::file_size(file);
+                const std::string ext = extensionNoDot(file);
+                std::uint16_t type = 0xFFFFu;
+                if (!ext.empty()) {
+                    type = neoerf::Resource::string_to_res_type(ext, activeProfile());
+                }
+                if (type == 0xFFFFu && !archive().filename_based_resources()) {
+                    wxui::showMessage(this, "Unsupported Resource", "Unable to add file: " + file.string());
+                    continue;
+                }
+
+                const std::string leaf = neoerf::filename_string(file);
+                const bool exists = archive().filename_based_resources()
+                    ? archive().resource_exists_by_name(leaf, true)
+                    : archive().resource_exists(leaf, true);
+                if (exists && !yesToAll) {
+                    const int answer = showReplaceResourceDialog(this, leaf, darkMode_);
+                    if (answer == wxID_CANCEL) {
+                        break;
+                    }
+                    if (answer == wxID_NO) {
+                        continue;
+                    }
+                    if (answer == wxID_APPLY) {
+                        yesToAll = true;
+                    }
+                }
+
+                addResourceFromImportedPath(file, type, ext, size);
+                ++inserted;
+            }
+            refreshList();
+            if (inserted > 0) {
+                setStatus(inserted == 1 ? "1 new resource added." : std::to_string(inserted) + " new resources added.",
+                          archive().filename().filename().string(), fileCountText());
+            }
+            updateUiState();
+            updateTitle();
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
+        setProgressVisible(false, 0);
+    }
+
+    void addResourceFromImportedPath(const std::filesystem::path& file,
+                                     std::uint16_t type,
+                                     const std::string& extension,
+                                     std::uintmax_t size) {
+        archive().add_resource(file, true);
+        const std::string leaf = neoerf::filename_string(file);
+        std::string resref = neoerf::resource_stem_from_text(leaf);
+        if (!archive().filename_based_resources()) {
+            resref = neoerf::string_to_resref(
+                neoerf::ascii_lower(resref), archive().extended_resrefs());
+            eraseStagedDisplayRow(resref, type);
+            stagedRows().push_back(
+                ResourceRow{resref, {}, extensionForType(type), type, size, true});
+        } else {
+            eraseStagedDisplayRow(leaf, type);
+            stagedRows().push_back(
+                ResourceRow{resref, leaf, extension, type, size, true});
+        }
+    }
+
+#if defined(__EMSCRIPTEN__)
+    struct BrowserArchiveSaveRequest {
+        wxWindow* documentPage = nullptr;
+        std::filesystem::path sourceArchivePath;
+        std::filesystem::path outputPath;
+        std::string downloadName;
+    };
+
+    bool browserArchiveSaveStillTargetsActiveDocument() const {
+        return browserArchiveSave_ &&
+               hasActiveDocument() &&
+               activeDocument().tabPage == browserArchiveSave_->documentPage &&
+               archive().loaded() &&
+               archive().filename() == browserArchiveSave_->sourceArchivePath;
+    }
+
+    void beginBrowserArchiveSave(std::string requestedName) {
+        if (!archive().loaded()) {
+            wxui::showMessage(this, "Save Archive", "No archive is loaded.");
+            return;
+        }
+        if (browserArchiveSave_ || browserResourceImport_ || browserResourceDelete_ ||
+            browserPatcherExport_) {
+            setStatus(
+                "Finish the current archive operation before saving.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+
+        try {
+            requestedName = browserArchiveNameWithExtension(archive().filename(),
+                                                            std::move(requestedName));
+            const std::filesystem::path outputPath =
+                neobrowser::createDownloadPath(requestedName);
+            const std::string downloadName = neoerf::filename_string(outputPath);
+
+            auto request = std::make_unique<BrowserArchiveSaveRequest>();
+            request->documentPage = activeDocument().tabPage;
+            request->sourceArchivePath = archive().filename();
+            request->outputPath = outputPath;
+            request->downloadName = downloadName;
+            browserArchiveSave_ = std::move(request);
+
+            setProgressVisible(true, 1);
+            setStatus(
+                "Rebuilding " + downloadName + "...",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            updateUiState();
+
+            // wxWidgets-WASM dispatches menu and button handlers through a
+            // synchronous JavaScript call. Return from that call before archive
+            // serialization and before creating the browser download action.
+            CallAfter([this]() { processBrowserArchiveSave(); });
+        } catch (const std::exception& ex) {
+            setProgressVisible(false, 0);
+            browserArchiveSave_.reset();
+            updateUiState();
+            wxui::showError(this, ex);
+        }
+    }
+
+    void processBrowserArchiveSave() {
+        if (!browserArchiveSave_ || IsBeingDeleted()) {
+            return;
+        }
+        if (!browserArchiveSaveStillTargetsActiveDocument()) {
+            setProgressVisible(false, 0);
+            browserArchiveSave_.reset();
+            updateUiState();
+            setStatus(
+                "Archive save cancelled because the active document changed.",
+                hasActiveDocument() && archive().loaded()
+                    ? neoerf::filename_string(archive().filename())
+                    : std::string{},
+                hasActiveDocument() && archive().loaded()
+                    ? fileCountText()
+                    : std::string{});
+            return;
+        }
+
+        const std::filesystem::path outputPath = browserArchiveSave_->outputPath;
+        const std::string downloadName = browserArchiveSave_->downloadName;
+        try {
+            // Always write to a fresh browser-owned path. This avoids replacing
+            // the imported host-file copy while it is still the archive's input
+            // stream and gives Save and Save As the same deterministic path.
+            saveActiveAs(outputPath);
+            std::vector<std::uint8_t> bytes = readBrowserDownloadBytes(outputPath);
+            if (!neobrowser::prepareDownloadBytes(
+                    bytes.empty() ? nullptr : bytes.data(),
+                    bytes.size(),
+                    downloadName)) {
+                throw std::runtime_error(
+                    "The browser could not prepare the rebuilt archive for download.");
+            }
+
+            stagedRows().clear();
+            refreshList();
+            updateTitle();
+            setStatus(
+                "Archive ready. Use the Download " + downloadName +
+                    " action shown above the editor.",
+                downloadName,
+                fileCountText());
+        } catch (const std::exception& ex) {
+            setStatus("Archive save failed.", downloadName, fileCountText());
+            wxui::showError(this, ex);
+        }
+
+        setProgressVisible(false, 0);
+        browserArchiveSave_.reset();
+        updateUiState();
+    }
+
+    void resolveBrowserSaveAsDialog(wxDialog* dialog,
+                                    wxTextCtrl* filename,
+                                    bool accept) {
+        if (browserSaveAsDialog_ != dialog) {
+            return;
+        }
+        std::string requestedName;
+        if (accept && filename != nullptr) {
+            requestedName = wxui::toStd(filename->GetValue());
+        }
+        browserSaveAsDialog_ = nullptr;
+        dialog->Hide();
+        dialog->Destroy();
+        updateUiState();
+
+        if (accept) {
+            beginBrowserArchiveSave(std::move(requestedName));
+        }
+    }
+
+    void showBrowserSaveAsDialog() {
+        if (!archive().loaded()) {
+            wxui::showMessage(this, "Save Archive As", "No archive is loaded.");
+            return;
+        }
+        if (browserSaveAsDialog_ != nullptr || browserArchiveSave_ ||
+            browserResourceImport_ || browserResourceDelete_ || browserPatcherExport_) {
+            return;
+        }
+
+        auto* dialog = new wxDialog(
+            this,
+            wxID_ANY,
+            "Save Archive As",
+            wxDefaultPosition,
+            wxDefaultSize,
+            wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        browserSaveAsDialog_ = dialog;
+
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        auto* explanation = new wxStaticText(
+            dialog,
+            wxID_ANY,
+            "Enter the download file name. NeoERF will rebuild the archive and "
+            "show a browser Download action; the original host file is not modified.");
+        explanation->Wrap(520);
+        root->Add(explanation, 0, wxEXPAND | wxALL, 14);
+
+        auto* filename = new wxTextCtrl(
+            dialog,
+            wxID_ANY,
+            wxui::toWx(neoerf::filename_string(archive().filename())));
+        root->Add(filename, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 14);
+
+        auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+        buttons->AddStretchSpacer(1);
+        auto* prepare = new wxButton(dialog, wxID_OK, "Prepare Download");
+        auto* cancel = new wxButton(dialog, wxID_CANCEL, "Cancel");
+        buttons->Add(prepare, 0, wxRIGHT, 8);
+        buttons->Add(cancel, 0);
+        root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 14);
+
+        prepare->Bind(wxEVT_BUTTON, [this, dialog, filename](wxCommandEvent&) {
+            resolveBrowserSaveAsDialog(dialog, filename, true);
+        });
+        cancel->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserSaveAsDialog(dialog, nullptr, false);
+        });
+        dialog->Bind(wxEVT_CLOSE_WINDOW, [this, dialog](wxCloseEvent&) {
+            resolveBrowserSaveAsDialog(dialog, nullptr, false);
+        });
+
+        dialog->SetSizerAndFit(root);
+        dialog->SetAffirmativeId(wxID_OK);
+        dialog->SetEscapeId(wxID_CANCEL);
+        wxui::configureResponsiveWindow(*dialog, wxSize(650, 260), wxSize(440, 220));
+        wxui::applyTheme(dialog, darkMode_);
+        dialog->CentreOnParent();
+        wxui::constrainWindowToDisplay(*dialog);
+        updateUiState();
+        dialog->Show();
+        dialog->Raise();
+        filename->SetFocus();
+        filename->SelectAll();
+    }
+
+    struct BrowserResourceImportBatch {
+        std::vector<std::filesystem::path> files;
+        std::size_t next = 0;
+        std::size_t inserted = 0;
+        std::size_t skipped = 0;
+        bool replaceAll = false;
+        bool replaceCurrent = false;
+        bool awaitingReplaceDecision = false;
+        bool cancelled = false;
+        wxWindow* documentPage = nullptr;
+        std::filesystem::path archivePath;
+        std::vector<std::string> errors;
+    };
+
+    void beginBrowserResourceImport(const std::vector<std::filesystem::path>& files) {
+        if (files.empty() || !archive().loaded()) {
+            return;
+        }
+        if (browserArchiveSave_ || browserSaveAsDialog_ != nullptr || browserPatcherExport_) {
+            setStatus(
+                "Finish saving or exporting the archive before adding more files.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+        if (browserResourceImport_) {
+            setStatus(
+                "A resource import is already in progress.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+        if (browserResourceDelete_) {
+            setStatus(
+                "Finish removing the selected resources before adding more files.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+
+        auto batch = std::make_unique<BrowserResourceImportBatch>();
+        batch->files = files;
+        batch->documentPage = activeDocument().tabPage;
+        batch->archivePath = archive().filename();
+        browserResourceImport_ = std::move(batch);
+
+        setProgressVisible(true, files.size());
+        setStatus(
+            files.size() == 1 ? "Importing 1 resource..."
+                              : "Importing " + std::to_string(files.size()) + " resources...",
+            neoerf::filename_string(archive().filename()),
+            fileCountText());
+        updateUiState();
+        CallAfter([this]() { processNextBrowserResourceImport(); });
+    }
+
+    bool browserResourceImportStillTargetsActiveDocument() const {
+        return browserResourceImport_ &&
+               hasActiveDocument() &&
+               activeDocument().tabPage == browserResourceImport_->documentPage &&
+               archive().loaded() &&
+               archive().filename() == browserResourceImport_->archivePath;
+    }
+
+    void continueBrowserResourceImport() {
+        CallAfter([this]() { processNextBrowserResourceImport(); });
+    }
+
+    void processNextBrowserResourceImport() {
+        if (!browserResourceImport_ || IsBeingDeleted()) {
+            return;
+        }
+        if (!browserResourceImportStillTargetsActiveDocument()) {
+            finishBrowserResourceImport(
+                "Resource import stopped because the active archive changed.");
+            return;
+        }
+
+        auto& batch = *browserResourceImport_;
+        if (batch.awaitingReplaceDecision) {
+            return;
+        }
+        if (batch.cancelled || batch.next >= batch.files.size()) {
+            finishBrowserResourceImport({});
+            return;
+        }
+
+        const std::filesystem::path file = batch.files[batch.next];
+        gauge_->SetValue(static_cast<int>(batch.next + 1));
+        try {
+            const std::uintmax_t size = neoerf::regular_file_size_after_open(file);
+            const std::string extension = extensionNoDot(file);
+            std::uint16_t type = 0xFFFFu;
+            if (!extension.empty()) {
+                type = neoerf::Resource::string_to_res_type(extension, activeProfile());
+            }
+            if (type == 0xFFFFu && !archive().filename_based_resources()) {
+                throw std::runtime_error(
+                    "Unsupported resource type for this archive: " + neoerf::filename_string(file));
+            }
+
+            const std::string leaf = neoerf::filename_string(file);
+            const bool exists = archive().filename_based_resources()
+                ? archive().resource_exists_by_name(leaf, true)
+                : archive().resource_exists(leaf, true);
+            if (exists && !batch.replaceAll && !batch.replaceCurrent) {
+                showBrowserReplaceResourceDialog(leaf);
+                return;
+            }
+
+            addResourceFromImportedPath(file, type, extension, size);
+            ++batch.inserted;
+            ++batch.next;
+            batch.replaceCurrent = false;
+        } catch (const std::exception& ex) {
+            ++batch.skipped;
+            ++batch.next;
+            batch.replaceCurrent = false;
+            batch.errors.push_back(neoerf::filename_string(file) + ": " + ex.what());
+        }
+
+        continueBrowserResourceImport();
+    }
+
+    void showBrowserReplaceResourceDialog(const std::string& resourceName) {
+        if (!browserResourceImport_ || browserResourceImport_->awaitingReplaceDecision) {
+            return;
+        }
+        browserResourceImport_->awaitingReplaceDecision = true;
+
+        auto* dialog = new wxDialog(
+            this,
+            wxID_ANY,
+            "Replace Resource",
+            wxDefaultPosition,
+            wxDefaultSize,
+            wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        browserReplaceDialog_ = dialog;
+
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        auto* message = new wxStaticText(
+            dialog,
+            wxID_ANY,
+            wxui::toWx(
+                "The resource " + resourceName +
+                " already exists in this archive. Replace it?"));
+        message->Wrap(440);
+        root->Add(message, 0, wxEXPAND | wxALL, 14);
+
+        auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+        buttons->AddStretchSpacer(1);
+        auto* yes = new wxButton(dialog, wxID_YES, "Replace");
+        auto* yesAll = new wxButton(dialog, wxID_APPLY, "Replace all");
+        auto* no = new wxButton(dialog, wxID_NO, "Skip");
+        auto* cancel = new wxButton(dialog, wxID_CANCEL, "Cancel remaining");
+        buttons->Add(yes, 0, wxRIGHT, 6);
+        buttons->Add(yesAll, 0, wxRIGHT, 6);
+        buttons->Add(no, 0, wxRIGHT, 6);
+        buttons->Add(cancel, 0);
+        root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 14);
+
+        yes->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_YES);
+        });
+        yesAll->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_APPLY);
+        });
+        no->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_NO);
+        });
+        cancel->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_CANCEL);
+        });
+        dialog->Bind(wxEVT_CLOSE_WINDOW, [this, dialog](wxCloseEvent&) {
+            resolveBrowserReplaceDecision(dialog, wxID_CANCEL);
+        });
+
+        dialog->SetSizerAndFit(root);
+        wxui::configureResponsiveWindow(*dialog, wxSize(580, 230), wxSize(420, 190));
+        wxui::applyTheme(dialog, darkMode_);
+        dialog->CentreOnParent();
+        wxui::constrainWindowToDisplay(*dialog);
+        dialog->Show();
+        dialog->Raise();
+    }
+
+    void resolveBrowserReplaceDecision(wxDialog* dialog, int answer) {
+        if (browserReplaceDialog_ != dialog) {
+            return;
+        }
+        browserReplaceDialog_ = nullptr;
+        dialog->Hide();
+        dialog->Destroy();
+
+        if (!browserResourceImport_) {
+            return;
+        }
+        auto& batch = *browserResourceImport_;
+        batch.awaitingReplaceDecision = false;
+        if (answer == wxID_YES) {
+            batch.replaceCurrent = true;
+        } else if (answer == wxID_APPLY) {
+            batch.replaceAll = true;
+        } else if (answer == wxID_NO) {
+            ++batch.skipped;
+            ++batch.next;
+            batch.errors.push_back("Skipped existing resource: " +
+                                   neoerf::filename_string(batch.files[batch.next - 1]));
+        } else {
+            batch.cancelled = true;
+        }
+        continueBrowserResourceImport();
+    }
+
+    void finishBrowserResourceImport(const std::string& fatalError) {
+        if (!browserResourceImport_) {
+            return;
+        }
+        if (browserReplaceDialog_ != nullptr) {
+            wxDialog* dialog = browserReplaceDialog_;
+            browserReplaceDialog_ = nullptr;
+            dialog->Hide();
+            dialog->Destroy();
+        }
+
+        std::unique_ptr<BrowserResourceImportBatch> completed =
+            std::move(browserResourceImport_);
+        setProgressVisible(false, 0);
+
+        if (hasActiveDocument() &&
+            activeDocument().tabPage == completed->documentPage &&
+            archive().loaded() &&
+            archive().filename() == completed->archivePath) {
+            refreshList();
+            updateUiState();
+            updateTitle();
+        }
+
+        std::string message;
+        if (!fatalError.empty()) {
+            message = fatalError;
+        } else if (completed->cancelled) {
+            message = "Resource import cancelled after staging " +
+                      std::to_string(completed->inserted) + ".";
+        } else if (completed->inserted == 0 && completed->skipped == 0) {
+            message = "No resources were selected.";
+        } else {
+            message = completed->inserted == 1
+                ? "1 resource staged. Use Save to download the modified archive."
+                : std::to_string(completed->inserted) +
+                      " resources staged. Use Save to download the modified archive.";
+            if (completed->skipped > 0) {
+                message += " " + std::to_string(completed->skipped) + " skipped.";
+            }
+        }
+
+        if (!completed->errors.empty()) {
+            message += " " + completed->errors.front();
+            if (completed->errors.size() > 1) {
+                message += " (" + std::to_string(completed->errors.size() - 1) +
+                           " more issue(s); see the browser console.)";
+            }
+            for (const auto& error : completed->errors) {
+                std::fprintf(stderr, "[NeoERF] Resource import: %s\n", error.c_str());
+            }
+        }
+
+        const std::string archiveName = hasActiveDocument() && archive().loaded()
+            ? neoerf::filename_string(archive().filename())
+            : std::string{};
+        setStatus(message, archiveName, hasActiveDocument() && archive().loaded()
+            ? fileCountText()
+            : std::string{});
+        updateUiState();
+    }
+
+    struct BrowserResourceDeleteBatch {
+        std::vector<ResourceRow> resources;
+        std::size_t next = 0;
+        std::size_t removed = 0;
+        wxWindow* documentPage = nullptr;
+        std::filesystem::path archivePath;
+        std::vector<std::string> errors;
+    };
+
+    void beginBrowserResourceDelete(std::vector<ResourceRow> resources) {
+        if (resources.empty() || !archive().loaded()) {
+            return;
+        }
+        if (browserResourceImport_) {
+            setStatus(
+                "Finish the current resource import before removing resources.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+        if (browserArchiveSave_ || browserSaveAsDialog_ != nullptr || browserPatcherExport_) {
+            setStatus(
+                "Finish saving or exporting the archive before removing resources.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+        if (browserResourceDelete_) {
+            setStatus(
+                "A resource removal is already in progress.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+
+        auto batch = std::make_unique<BrowserResourceDeleteBatch>();
+        batch->resources = std::move(resources);
+        batch->documentPage = activeDocument().tabPage;
+        batch->archivePath = archive().filename();
+        browserResourceDelete_ = std::move(batch);
+        updateUiState();
+        showBrowserDeleteResourceDialog();
+    }
+
+    bool browserResourceDeleteStillTargetsActiveDocument() const {
+        return browserResourceDelete_ &&
+               hasActiveDocument() &&
+               activeDocument().tabPage == browserResourceDelete_->documentPage &&
+               archive().loaded() &&
+               archive().filename() == browserResourceDelete_->archivePath;
+    }
+
+    void showBrowserDeleteResourceDialog() {
+        if (!browserResourceDelete_ || browserDeleteDialog_ != nullptr) {
+            return;
+        }
+
+        auto* dialog = new wxDialog(
+            this,
+            wxID_ANY,
+            "Remove Resources",
+            wxDefaultPosition,
+            wxDefaultSize,
+            wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        browserDeleteDialog_ = dialog;
+
+        const auto& resources = browserResourceDelete_->resources;
+        std::ostringstream messageText;
+        messageText << "Remove " << resources.size()
+                    << (resources.size() == 1 ? " selected resource" : " selected resources")
+                    << " from this archive?\n\n";
+        const std::size_t previewCount = std::min<std::size_t>(resources.size(), 6);
+        for (std::size_t i = 0; i < previewCount; ++i) {
+            messageText << "- " << resources[i].filename() << "\n";
+        }
+        if (resources.size() > previewCount) {
+            messageText << "- ... and " << (resources.size() - previewCount) << " more\n";
+        }
+        messageText
+            << "\nThe browser-selected source file is not changed. "
+               "Use Save afterward to download the rebuilt archive.";
+
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        auto* message = new wxStaticText(dialog, wxID_ANY, wxui::toWx(messageText.str()));
+        message->Wrap(520);
+        root->Add(message, 0, wxEXPAND | wxALL, 14);
+
+        auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+        buttons->AddStretchSpacer(1);
+        auto* remove = new wxButton(dialog, wxID_YES, "Remove");
+        auto* cancel = new wxButton(dialog, wxID_CANCEL, "Cancel");
+        buttons->Add(remove, 0, wxRIGHT, 8);
+        buttons->Add(cancel, 0);
+        root->Add(buttons, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 14);
+
+        remove->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserDeleteDecision(dialog, true);
+        });
+        cancel->Bind(wxEVT_BUTTON, [this, dialog](wxCommandEvent&) {
+            resolveBrowserDeleteDecision(dialog, false);
+        });
+        dialog->Bind(wxEVT_CLOSE_WINDOW, [this, dialog](wxCloseEvent&) {
+            resolveBrowserDeleteDecision(dialog, false);
+        });
+
+        dialog->SetSizerAndFit(root);
+        wxui::configureResponsiveWindow(*dialog, wxSize(650, 330), wxSize(450, 230));
+        wxui::applyTheme(dialog, darkMode_);
+        dialog->CentreOnParent();
+        wxui::constrainWindowToDisplay(*dialog);
+        dialog->Show();
+        dialog->Raise();
+    }
+
+    void resolveBrowserDeleteDecision(wxDialog* dialog, bool remove) {
+        if (browserDeleteDialog_ != dialog) {
+            return;
+        }
+        browserDeleteDialog_ = nullptr;
+        dialog->Hide();
+        dialog->Destroy();
+
+        if (!browserResourceDelete_) {
+            return;
+        }
+        if (!remove) {
+            browserResourceDelete_.reset();
+            setStatus(
+                "Resource removal cancelled.",
+                hasActiveDocument() && archive().loaded()
+                    ? neoerf::filename_string(archive().filename())
+                    : std::string{},
+                hasActiveDocument() && archive().loaded()
+                    ? fileCountText()
+                    : std::string{});
+            updateUiState();
+            return;
+        }
+
+        setProgressVisible(true, browserResourceDelete_->resources.size());
+        setStatus(
+            browserResourceDelete_->resources.size() == 1
+                ? "Removing 1 resource..."
+                : "Removing " + std::to_string(browserResourceDelete_->resources.size()) +
+                      " resources...",
+            neoerf::filename_string(archive().filename()),
+            fileCountText());
+        updateUiState();
+        CallAfter([this]() { processNextBrowserResourceDelete(); });
+    }
+
+    void processNextBrowserResourceDelete() {
+        if (!browserResourceDelete_ || IsBeingDeleted()) {
+            return;
+        }
+        if (!browserResourceDeleteStillTargetsActiveDocument()) {
+            finishBrowserResourceDelete(
+                "Resource removal stopped because the active archive changed.");
+            return;
+        }
+
+        auto& batch = *browserResourceDelete_;
+        constexpr std::size_t kDeletesPerTurn = 16;
+        std::size_t processed = 0;
+        while (batch.next < batch.resources.size() && processed < kDeletesPerTurn) {
+            const ResourceRow row = batch.resources[batch.next];
+            try {
+                if (archive().filename_based_resources()) {
+                    archive().delete_resource_by_name(row.filename());
+                    if (row.staged) {
+                        eraseStagedDisplayRow(row.filename(), row.restype);
+                    }
+                } else {
+                    archive().delete_resource(row.staged ? row.resref + "*" : row.resref,
+                                              row.restype);
+                    if (row.staged) {
+                        eraseStagedDisplayRow(row.resref, row.restype);
+                    }
+                }
+                ++batch.removed;
+            } catch (const std::exception& ex) {
+                batch.errors.push_back(row.filename() + ": " + ex.what());
+            }
+            ++batch.next;
+            ++processed;
+        }
+
+        gauge_->SetValue(static_cast<int>(batch.next));
+        if (batch.next < batch.resources.size()) {
+            CallAfter([this]() { processNextBrowserResourceDelete(); });
+        } else {
+            finishBrowserResourceDelete({});
+        }
+    }
+
+    void finishBrowserResourceDelete(const std::string& fatalError) {
+        if (!browserResourceDelete_) {
+            return;
+        }
+        if (browserDeleteDialog_ != nullptr) {
+            wxDialog* dialog = browserDeleteDialog_;
+            browserDeleteDialog_ = nullptr;
+            dialog->Hide();
+            dialog->Destroy();
+        }
+
+        std::unique_ptr<BrowserResourceDeleteBatch> completed =
+            std::move(browserResourceDelete_);
+        setProgressVisible(false, 0);
+
+        const bool sameDocument = hasActiveDocument() &&
+            activeDocument().tabPage == completed->documentPage &&
+            archive().loaded() &&
+            archive().filename() == completed->archivePath;
+        if (sameDocument) {
+            refreshList();
+            updateTitle();
+        }
+
+        std::string message;
+        if (!fatalError.empty()) {
+            message = fatalError;
+        } else if (completed->removed == 0) {
+            message = "No resources were removed.";
+        } else {
+            message = completed->removed == 1
+                ? "1 resource removed. Use Save to download the modified archive."
+                : std::to_string(completed->removed) +
+                      " resources removed. Use Save to download the modified archive.";
+        }
+
+        if (!completed->errors.empty()) {
+            message += " " + completed->errors.front();
+            if (completed->errors.size() > 1) {
+                message += " (" + std::to_string(completed->errors.size() - 1) +
+                           " more issue(s); see the browser console.)";
+            }
+            for (const auto& error : completed->errors) {
+                std::fprintf(stderr, "[NeoERF] Resource removal: %s\n", error.c_str());
+            }
+        }
+
+        const std::string archiveName = sameDocument
+            ? neoerf::filename_string(archive().filename())
+            : std::string{};
+        setStatus(message, archiveName, sameDocument ? fileCountText() : std::string{});
+        updateUiState();
+    }
+
+    struct BrowserPatcherExportRequest {
+        wxWindow* documentPage = nullptr;
+        std::filesystem::path archivePath;
+        neoerf::ArchivePatcherResult result;
+        wxui::PatcherOutputSelection output;
+        std::vector<std::string> relativeFiles;
+        std::filesystem::path workspaceRoot;
+        std::filesystem::path workspaceIni;
+        bool iniExisted = false;
+    };
+
+    bool browserPatcherExportStillTargetsActiveDocument() const {
+        return browserPatcherExport_ &&
+               hasActiveDocument() &&
+               activeDocument().tabPage == browserPatcherExport_->documentPage &&
+               archive().loaded() &&
+               archive().filename() == browserPatcherExport_->archivePath;
+    }
+
+    static std::string browserPackagePathKey(std::string path) {
+        path = neobrowser::normalizePackageRelativePath(std::move(path), false);
+        std::transform(path.begin(), path.end(), path.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        return path;
+    }
+
+    static std::vector<std::string> browserPatcherRelativeFiles(
+        const neoerf::ArchivePatcherResult& result,
+        const std::string& relativeIniPath) {
+        const std::string normalizedIni =
+            neobrowser::normalizePackageRelativePath(relativeIniPath, true);
+        const std::filesystem::path parent =
+            std::filesystem::path(normalizedIni).parent_path();
+        std::vector<std::string> files;
+        std::vector<std::string> keys;
+        auto add = [&](const std::filesystem::path& relative) {
+            const std::string normalized = neobrowser::normalizePackageRelativePath(
+                relative.generic_string(), false);
+            const std::string key = browserPackagePathKey(normalized);
+            if (std::find(keys.begin(), keys.end(), key) != keys.end()) return;
+            keys.push_back(key);
+            files.push_back(normalized);
+        };
+        for (const auto& change : result.changes) {
+            add(parent / change.payloadName);
+        }
+        add(parent / "info.rtf");
+        add(normalizedIni);
+        return files;
+    }
+
+    void beginBrowserPatcherExport(neoerf::ArchivePatcherResult result,
+                                   const wxui::PatcherOutputSelection& output) {
+        if (browserArchiveSave_ || browserResourceImport_ || browserResourceDelete_ ||
+            browserPatcherExport_) {
+            setStatus(
+                "Finish the current archive operation before exporting a patcher package.",
+                archive().loaded() ? neoerf::filename_string(archive().filename()) : std::string{},
+                archive().loaded() ? fileCountText() : std::string{});
+            return;
+        }
+        if (!output.writesToIni() || output.browserDirectorySession == 0) {
+            wxui::showMessage(
+                this,
+                "Patcher Export",
+                "Select an installer folder and an exact package-relative INI path.");
+            return;
+        }
+
+        try {
+            const std::string relativeIni = neobrowser::normalizePackageRelativePath(
+                output.browserIniPath, true);
+            auto request = std::make_unique<BrowserPatcherExportRequest>();
+            request->documentPage = activeDocument().tabPage;
+            request->archivePath = archive().filename();
+            request->result = std::move(result);
+            request->output = output;
+            request->output.browserIniPath = relativeIni;
+            request->relativeFiles = browserPatcherRelativeFiles(
+                request->result, relativeIni);
+            browserPatcherExport_ = std::move(request);
+
+            setProgressVisible(true, 3);
+            updateProgress(1);
+            setStatus(
+                "Reading the selected installer INI and checking package payloads...",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            updateUiState();
+
+            wxWeakRef<NeoERFPanelImpl> weakThis(this);
+            neobrowser::requestPackageWorkspace(
+                browserPatcherExport_->output.browserDirectorySession,
+                browserPatcherExport_->output.browserIniPath,
+                browserPatcherExport_->relativeFiles,
+                [weakThis](neobrowser::PackageWorkspaceResult workspace) mutable {
+                    if (!weakThis) return;
+                    NeoERFPanelImpl* frame = weakThis.get();
+                    if (frame->IsBeingDeleted() || !frame->browserPatcherExport_) return;
+                    if (!workspace.error.empty()) {
+                        frame->finishBrowserPatcherExport(workspace.error, std::nullopt);
+                        return;
+                    }
+                    if (!frame->browserPatcherExportStillTargetsActiveDocument()) {
+                        frame->finishBrowserPatcherExport(
+                            "Patcher export was cancelled because the active archive changed.",
+                            std::nullopt);
+                        return;
+                    }
+                    frame->browserPatcherExport_->workspaceRoot = std::move(workspace.workspaceRoot);
+                    frame->browserPatcherExport_->workspaceIni = std::move(workspace.iniPath);
+                    frame->browserPatcherExport_->iniExisted = workspace.iniExisted;
+                    frame->updateProgress(2);
+                    frame->setStatus(
+                        "Generating installer instructions and archive payloads...",
+                        neoerf::filename_string(frame->archive().filename()),
+                        frame->fileCountText());
+                    frame->CallAfter([weakThis]() mutable {
+                        if (!weakThis) return;
+                        weakThis->processBrowserPatcherExport();
+                    });
+                });
+        } catch (const std::exception& exception) {
+            setProgressVisible(false, 0);
+            browserPatcherExport_.reset();
+            updateUiState();
+            wxui::showError(this, exception);
+        }
+    }
+
+    void processBrowserPatcherExport() {
+        if (!browserPatcherExport_ || IsBeingDeleted()) return;
+        if (!browserPatcherExportStillTargetsActiveDocument()) {
+            finishBrowserPatcherExport(
+                "Patcher export was cancelled because the active archive changed.",
+                std::nullopt);
+            return;
+        }
+
+        try {
+            neoerf::writeArchivePatcherPackageToIni(
+                browserPatcherExport_->result,
+                archive(),
+                browserPatcherExport_->workspaceIni,
+                false);
+            updateProgress(3);
+            setStatus(
+                "Committing payloads and the selected installer INI...",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            wxWeakRef<NeoERFPanelImpl> weakThis(this);
+            neobrowser::requestCommitPackageWorkspace(
+                browserPatcherExport_->output.browserDirectorySession,
+                browserPatcherExport_->workspaceRoot,
+                browserPatcherExport_->output.browserIniPath,
+                browserPatcherExport_->relativeFiles,
+                [weakThis](neobrowser::PackageCommitResult result) mutable {
+                    if (!weakThis) return;
+                    NeoERFPanelImpl* frame = weakThis.get();
+                    if (frame->IsBeingDeleted() || !frame->browserPatcherExport_) return;
+                    if (!result.error.empty()) {
+                        frame->finishBrowserPatcherExport(result.error, std::nullopt);
+                        return;
+                    }
+                    frame->finishBrowserPatcherExport({}, result);
+                });
+        } catch (const std::exception& exception) {
+            finishBrowserPatcherExport(exception.what(), std::nullopt);
+        }
+    }
+
+    void finishBrowserPatcherExport(
+        const std::string& error,
+        std::optional<neobrowser::PackageCommitResult> commit) {
+        if (!browserPatcherExport_) return;
+        std::unique_ptr<BrowserPatcherExportRequest> completed =
+            std::move(browserPatcherExport_);
+        setProgressVisible(false, 0);
+        updateUiState();
+
+        if (!completed->workspaceRoot.empty()) {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(completed->workspaceRoot, cleanupError);
+            if (cleanupError) {
+                std::fprintf(
+                    stderr,
+                    "[NeoERF] Unable to remove temporary browser patcher workspace %s: %s\n",
+                    neoerf::path_to_string(completed->workspaceRoot).c_str(),
+                    cleanupError.message().c_str());
+            }
+        }
+
+        const bool sameDocument = hasActiveDocument() &&
+            activeDocument().tabPage == completed->documentPage &&
+            archive().loaded() &&
+            archive().filename() == completed->archivePath;
+        const std::string archiveName = sameDocument
+            ? neoerf::filename_string(archive().filename())
+            : std::string{};
+        if (!error.empty()) {
+            setStatus(
+                "Patcher package export failed.",
+                archiveName,
+                sameDocument ? fileCountText() : std::string{});
+            wxMessageBox(
+                wxui::toWx(error),
+                "Unable to Export Patcher Package",
+                wxOK | wxICON_ERROR,
+                this);
+            return;
+        }
+
+        const neobrowser::PackageCommitResult report = commit.value_or(
+            neobrowser::PackageCommitResult{});
+        std::ostringstream message;
+        if (report.iniChanged) {
+            message << (completed->iniExisted
+                ? "Merged archive instructions into:\n"
+                : "Created the installer INI:\n");
+        } else {
+            message << "The selected installer INI already represented these instructions:\n";
+        }
+        message << completed->output.browserIniPath
+                << "\n\nPayload and package files written: " << report.filesWritten
+                << "\nExisting identical files reused: " << report.filesReused
+                << "\n\nAdded resource instructions: " << completed->result.installCount()
+                << "\nReplacement instructions: " << completed->result.replacementCount();
+
+        setStatus(
+            report.filesWritten == 0u
+                ? "Patcher package already up to date."
+                : "Patcher package exported.",
+            archiveName,
+            std::to_string(completed->result.installCount()) + " added, " +
+                std::to_string(completed->result.replacementCount()) + " replaced");
+        wxui::showMessage(this, "Patcher Package Exported", message.str());
+    }
+#endif
+
+    struct DocumentTab {
+        neoerf::ArchiveDocument model;
+        std::vector<ResourceRow> stagedRows;
+        neoview::DocumentViewState viewState;
+        neoerf::ResourceNameProfile profile = neoerf::ResourceNameProfile::KotOR;
+        std::string untitledName = "Untitled ERF";
+        wxWindow* tabPage = nullptr;
+    };
+
+    bool hasActiveDocument() const {
+        return activeDocumentIndex_ != neotabs::npos && activeDocumentIndex_ < documents_.size();
+    }
+
+    DocumentTab& activeDocument() { return documents_.at(activeDocumentIndex_); }
+    const DocumentTab& activeDocument() const { return documents_.at(activeDocumentIndex_); }
+    neoerf::ErfArchive& archive() { return activeDocument().model.archive(); }
+    const neoerf::ErfArchive& archive() const { return activeDocument().model.archive(); }
+    std::vector<ResourceRow>& stagedRows() { return activeDocument().stagedRows; }
+    const std::vector<ResourceRow>& stagedRows() const { return activeDocument().stagedRows; }
+    neoview::DocumentViewState& viewState() { return activeDocument().viewState; }
+    const neoview::DocumentViewState& viewState() const { return activeDocument().viewState; }
+    neoerf::ResourceNameProfile& profile() { return activeDocument().profile; }
+    const neoerf::ResourceNameProfile& profile() const { return activeDocument().profile; }
+
+    bool tabDirty(const DocumentTab& tab) const { return tab.model.needsSave(); }
+
+    std::string tabDisplayName(const DocumentTab& tab) const {
+        return neotabs::displayNameForPath(tab.model.archive().filename(), tab.untitledName);
+    }
+
+    void updateActiveTabTitle() {
+        if (!hasActiveDocument()) return;
+        neotabs::setTabLabel(documentTabs_, activeDocument().tabPage, tabDisplayName(activeDocument()), tabDirty(activeDocument()));
+    }
+
+    void selectDocumentTab(std::size_t index) {
+        if (documentTabs_ == nullptr || index >= documents_.size()) return;
+        tabSwitchInProgress_ = true;
+        const bool selected = neotabs::changeSelectionToPage(documentTabs_, documents_[index].tabPage);
+        tabSwitchInProgress_ = false;
+        if (!selected) return;
+        activeDocumentIndex_ = index;
+        applyResourceProfileMenu();
+        refreshList();
+        updateTitle();
+        updateUiState();
+    }
+
+    void createDocumentTab(bool select = true) {
+        DocumentTab tab;
+        tab.model.archive().set_resource_type_profile(tab.profile);
+        tab.viewState.resetForNewDocument();
+        tab.viewState.sortColumn = 0;
+        tab.viewState.sortAscending = true;
+        const std::size_t previousActiveIndex = activeDocumentIndex_;
+        documents_.push_back(std::move(tab));
+        const std::size_t index = documents_.size() - 1;
+
+        tabSwitchInProgress_ = true;
+        wxWindow* const page = neotabs::addTabPage(
+            documentTabs_, tabDisplayName(documents_.back()), tabDirty(documents_.back()), select);
+        if (page != nullptr) documents_.back().tabPage = page;
+        tabSwitchInProgress_ = false;
+
+        if (page == nullptr) {
+            documents_.pop_back();
+            activeDocumentIndex_ = previousActiveIndex;
+            throw std::runtime_error("Unable to create a document tab.");
+        }
+
+        if (select) {
+            activeDocumentIndex_ = index;
+            tabSwitchInProgress_ = true;
+            neotabs::changeSelectionToPage(documentTabs_, page);
+            tabSwitchInProgress_ = false;
+            refreshList();
+            updateTitle();
+            updateUiState();
+        }
+    }
+
+    bool activeTabIsReusableForOpen() const {
+        return hasActiveDocument() && documents_.size() == 1 && !tabDirty(activeDocument()) && !archive().loaded();
+    }
+
+    void ensureDocumentTabForOpen() {
+        if (!hasActiveDocument()) { createDocumentTab(true); return; }
+        if (!activeTabIsReusableForOpen()) createDocumentTab(true);
+    }
+
+    bool confirmCloseDocumentTab(std::size_t index) {
+        if (index >= documents_.size()) return true;
+        if (!tabDirty(documents_[index])) return true;
+        return wxui::confirm(this, "Close tab", neotabs::closePromptText(tabDisplayName(documents_[index])));
+    }
+
+    bool closeDocumentTab(std::size_t index) {
+        if (index >= documents_.size() || !confirmCloseDocumentTab(index)) return false;
+
+        wxWindow* const page = documents_[index].tabPage;
+        tabSwitchInProgress_ = true;
+        const bool deleted = neotabs::deleteTabPage(documentTabs_, page);
+        tabSwitchInProgress_ = false;
+        if (!deleted) return false;
+
+        documents_.erase(documents_.begin() + static_cast<std::ptrdiff_t>(index));
+        if (documents_.empty()) {
+            activeDocumentIndex_ = neotabs::npos;
+            createDocumentTab(true);
+            return true;
+        }
+
+        std::size_t selectedIndex = neotabs::findDocumentIndexForPage(
+            documents_, neotabs::currentPage(documentTabs_));
+        if (selectedIndex == neotabs::npos) selectedIndex = std::min(index, documents_.size() - 1);
+        selectDocumentTab(selectedIndex);
+        return true;
+    }
+
+    bool confirmCloseAllTabs() {
+        for (std::size_t i = 0; i < documents_.size(); ++i) {
+            if (!confirmCloseDocumentTab(i)) return false;
+        }
+        return true;
+    }
+
+    void onDocumentTabChanged(wxAuiNotebookEvent& event) {
+        if (tabSwitchInProgress_) { event.Skip(); return; }
+        const int selection = event.GetSelection();
+        const std::size_t index = neotabs::findDocumentIndexForPage(
+            documents_, neotabs::pageForIndex(documentTabs_, selection));
+        if (index != neotabs::npos) selectDocumentTab(index);
+        event.Skip();
+    }
+
+    void onDocumentTabCloseRequested(wxAuiNotebookEvent& event) {
+        event.Veto();
+        const int selection = event.GetSelection();
+        if (selection < 0) return;
+        const std::size_t index = neotabs::findDocumentIndexForPage(
+            documents_, neotabs::pageForIndex(documentTabs_, selection));
+        if (index != neotabs::npos) closeDocumentTab(index);
+    }
+
+    static std::string appTitle() { return std::string("NeoERF v") + neoerf::kVersion + " (ERF/RIM file editor)"; }
+
+    std::unique_ptr<neogames::OpenGameDirectoryMenu> gameDirectoryMenu_;
+
+    void buildMenus() {
+        auto* file = new wxMenu;
+        file->Append(ID_New, "&New\tCtrl+N");
+        file->Append(ID_Open, "&Open...\tCtrl+O");
+        recentFilesMenu_ = new wxMenu;
+        rebuildRecentFilesMenu();
+        file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
+        file->AppendSeparator();
+        file->Append(ID_Save, "&Save\tCtrl+S");
+        file->Append(ID_SaveAs, "Save &As...\tCtrl+Shift+S");
+        file->AppendSeparator();
+        file->Append(ID_CloseTab, "&Close Tab\tCtrl-W");
+        file->Append(ID_CloseOtherTabs, "Close &Other Tabs");
+        file->Append(ID_NextTab, "Next Tab\tCtrl-Tab");
+        file->Append(ID_PreviousTab, "Previous Tab\tCtrl-Shift-Tab");
+        gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
+            *this, *file, [this](const neogames::SavedGameDirectory& directory) {
+                chooseAndOpenArchive(
+                    directory.path,
+                    neoerf::resource_name_profile_for_game_id(directory.gameId));
+            });
+        file->AppendSeparator();
+        if (!context_.embedded) file->Append(ID_Quit, "&Quit\tCtrl+Q");
+
+        auto* exportMenu = new wxMenu;
+        exportMenu->Append(ID_ExportArchivePatcher,
+                           "Export TSLPatcher/HoloPatcher Instructions...");
+
+        auto* tools = new wxMenu;
+        tools->Append(ID_OpenMember,"Open selected resource");
+        tools->Append(ID_ExtractAll,"Extract all...");
+        tools->Append(ID_Extract, "&Extract selected...\tCtrl+E");
+        tools->Append(ID_Delete, "&Delete selected\tCtrl+D");
+        tools->AppendSeparator();
+        tools->Append(ID_Add, "&Add resources...\tCtrl+I");
+        tools->AppendSeparator();
+        tools->Append(ID_Find, "&Find in list...\tCtrl+F");
+        tools->Append(ID_Filter, "&Filter/Search term...");
+        tools->Append(ID_FilterColumn, "Filter Selected &Column...");
+        tools->Append(ID_ClearColumnFilter, "Clear Filter on Selected Column");
+        tools->Append(ID_ClearAllFilters, "Clear All Filters");
+        tools->AppendSeparator();
+        tools->Append(ID_SelectAll, "Select &All\tCtrl+A");
+
+        auto* view = new wxMenu;
+        if (!context_.embedded) {
+        darkModeItem_ = view->AppendCheckItem(ID_DarkMode, "&Dark Mode");
+        view->AppendSeparator();
+        view->Append(ID_FontIncrease, "Increase Font Size\tCtrl++");
+        view->Append(ID_FontDecrease, "Decrease Font Size\tCtrl+-");
+        view->Append(ID_FontReset, "Reset Font Size\tCtrl+0");
+        view->AppendSeparator();
+        }
+        view->Append(ID_ResetColumnOrder, "Reset Column Order");
+        view->Append(ID_ResetRowOrder, "Reset Row Order");
+        view->AppendSeparator();
+        auto* profileMenu = new wxMenu;
+        profileKotORItem_ = profileMenu->AppendRadioItem(ID_ProfileKotOR, "Knights of the Old Republic resource names");
+        profileJadeItem_ = profileMenu->AppendRadioItem(ID_ProfileJade, "Jade Empire resource names");
+        profileNWNItem_ = profileMenu->AppendRadioItem(ID_ProfileNWN, "Neverwinter Nights resource names");
+        profileNWN2Item_ = profileMenu->AppendRadioItem(ID_ProfileNWN2, "Neverwinter Nights 2 resource names");
+        profileWitcherItem_ = profileMenu->AppendRadioItem(ID_ProfileWitcher, "The Witcher resource names");
+        profileDAOItem_ = profileMenu->AppendRadioItem(ID_ProfileDAO, "Dragon Age: Origins filenames");
+        profileDA2Item_ = profileMenu->AppendRadioItem(ID_ProfileDA2, "Dragon Age II filenames/hashes");
+        view->AppendSubMenu(profileMenu, "Resource &Profile");
+
+        auto* help = new wxMenu;
+        help->Append(ID_About, "&About");
+
+        auto* bar = new wxMenuBar;
+        bar->Append(file, "&File");
+        bar->Append(exportMenu, "&Export");
+        bar->Append(tools, "&Tools");
+        bar->Append(view, "&View");
+        if (!context_.embedded) bar->Append(help, "&Help"); else delete help;
+        setModuleMenus(bar);
+    }
+
+    void buildLayout() {
+
+        panel_ = new wxPanel(this, wxID_ANY);
+        auto* root = new wxBoxSizer(wxVERTICAL);
+
+        documentTabs_ = new wxAuiNotebook(panel_, ID_DocumentTabs, wxDefaultPosition, wxDefaultSize,
+                                          wxAUI_NB_TOP | wxAUI_NB_TAB_MOVE | wxAUI_NB_CLOSE_ON_ACTIVE_TAB | wxAUI_NB_SCROLL_BUTTONS);
+        root->Add(documentTabs_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
+        neotabs::configureDocumentTabStrip(documentTabs_);
+
+        auto* headerBox = new wxStaticBoxSizer(wxVERTICAL, panel_, "Archive");
+        auto* fileRow = new wxBoxSizer(wxHORIZONTAL);
+        fileRow->Add(new wxStaticText(panel_, wxID_ANY, "File:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        filePath_ = new wxTextCtrl(panel_, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
+        fileRow->Add(filePath_, 1, wxEXPAND | wxRIGHT, FromDIP(6));
+        fileRow->Add(new wxButton(panel_, ID_Open, "Open..."), 0, wxRIGHT, FromDIP(4));
+        fileRow->Add(new wxButton(panel_, ID_Save, "Save"), 0, wxRIGHT, FromDIP(4));
+        fileRow->Add(new wxButton(panel_, ID_SaveAs, "Save As..."), 0);
+        headerBox->Add(fileRow, 0, wxEXPAND | wxALL, FromDIP(8));
+
+        auto* filterRow = new wxBoxSizer(wxHORIZONTAL);
+        filterRow->Add(new wxStaticText(panel_, wxID_ANY, "Filter:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
+        filterText_ = new wxTextCtrl(panel_, wxID_ANY);filterText_->SetName("NeoERF search");
+        filterRow->Add(filterText_, 1, wxEXPAND | wxRIGHT, FromDIP(4));
+        filterRow->Add(new wxButton(panel_, ID_ClearFilter, "Clear"), 0);
+        headerBox->Add(filterRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+
+        auto* body = new wxBoxSizer(wxHORIZONTAL);
+
+        list_ = new wxListCtrl(panel_, ID_ResourceList, wxDefaultPosition, wxDefaultSize,
+                               wxLC_REPORT | wxLC_HRULES | wxLC_VRULES);
+        list_->SetName("NeoERF resources");
+        list_->AppendColumn("Resref", wxLIST_FORMAT_LEFT, FromDIP(200));
+        list_->AppendColumn("Type", wxLIST_FORMAT_LEFT, FromDIP(60));
+        list_->AppendColumn("Size", wxLIST_FORMAT_RIGHT, FromDIP(100));
+        list_->SetMinSize(FromDIP(wxSize(260, 220)));
+
+        auto* commandColumn = new wxBoxSizer(wxVERTICAL);
+        extractButton_ = new wxButton(panel_, ID_Extract, "E", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        insertButton_ = new wxButton(panel_, ID_Add, "+", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        deleteButton_ = new wxButton(panel_, ID_Delete, "-", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        findButton_ = new wxButton(panel_, ID_Find, "F", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+        extractButton_->SetToolTip("Extract selected resources.");
+        insertButton_->SetToolTip("Add resources to ERF file.");
+        deleteButton_->SetToolTip("Delete selected resources from ERF file.");
+        findButton_->SetToolTip("Find resource...");
+        commandColumn->Add(extractButton_, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+        commandColumn->Add(insertButton_, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+        commandColumn->Add(deleteButton_, 0, wxEXPAND | wxBOTTOM, FromDIP(6));
+        commandColumn->Add(findButton_, 0, wxEXPAND | wxBOTTOM, FromDIP(10));
+
+        gauge_ = new wxGauge(panel_, wxID_ANY, 100, wxDefaultPosition, wxDefaultSize, wxGA_VERTICAL | wxGA_SMOOTH);
+        gauge_->Hide();
+        commandColumn->Add(gauge_, 1, wxEXPAND);
+
+        body->Add(list_, 1, wxEXPAND | wxALL, FromDIP(8));
+        body->Add(commandColumn, 0, wxEXPAND | wxTOP | wxRIGHT | wxBOTTOM, FromDIP(8));
+        root->Add(headerBox, 0, wxEXPAND | wxALL, FromDIP(8));
+        root->Add(body, 1, wxEXPAND);
+        panel_->SetSizer(root);
+
+        auto* outer=new wxBoxSizer(wxVERTICAL);outer->Add(panel_,1,wxEXPAND);SetSizer(outer);
+        createModuleStatusBar(3);const int widths[]={-3,-2,-1};moduleStatusBar()->SetStatusWidths(3,widths);
+
+        list_->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+            layoutColumns();
+            event.Skip();
+        });
+        layoutColumns();
+    }
+
+    void layoutColumns() {
+        if (list_ == nullptr) {
+            return;
+        }
+        const int width = std::max(240, list_->GetClientSize().GetWidth());
+        const int typeWidth = FromDIP(64);
+        const int sizeWidth = FromDIP(100);
+        list_->SetColumnWidth(1, typeWidth);
+        list_->SetColumnWidth(2, sizeWidth);
+        list_->SetColumnWidth(0, std::max(120, width - typeWidth - sizeWidth - FromDIP(28)));
+    }
+
+    void bindEvents() {
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onNew, this, ID_New);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onOpen, this, ID_Open);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onOpenRecent, this, kRecentFileBaseId, kRecentFileBaseId + neosettings::kMaxRecentFiles - 1);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onClearRecentFiles, this, kClearRecentFilesId);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onSave, this, ID_Save);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onSaveAs, this, ID_SaveAs);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onExportArchivePatcher, this, ID_ExportArchivePatcher);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onCloseTab, this, ID_CloseTab);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onCloseOtherTabs, this, ID_CloseOtherTabs);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onNextTab, this, ID_NextTab);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onPreviousTab, this, ID_PreviousTab);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onAdd, this, ID_Add);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onExtract, this, ID_Extract);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onDelete, this, ID_Delete);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onFind, this, ID_Find);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onFilterPrompt, this, ID_Filter);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onClearFilter, this, ID_ClearFilter);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onFilterSelectedColumn, this, ID_FilterColumn);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onClearSelectedColumnFilter, this, ID_ClearColumnFilter);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onClearAllFilters, this, ID_ClearAllFilters);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onResetColumnOrder, this, ID_ResetColumnOrder);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onResetRowOrder, this, ID_ResetRowOrder);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onCopyCells, this, ID_CopyCells);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onPasteCells, this, ID_PasteCells);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onSelectAll, this, ID_SelectAll);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onToggleDarkMode, this, ID_DarkMode);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onIncreaseFontScale, this, ID_FontIncrease);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onDecreaseFontScale, this, ID_FontDecrease);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onResetFontScale, this, ID_FontReset);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::KotOR); }, ID_ProfileKotOR);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::JadeEmpire); }, ID_ProfileJade);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::NeverwinterNights); }, ID_ProfileNWN);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::NeverwinterNights2); }, ID_ProfileNWN2);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::Witcher); }, ID_ProfileWitcher);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::DragonAgeOrigins); }, ID_ProfileDAO);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setResourceProfile(neoerf::ResourceNameProfile::DragonAge2); }, ID_ProfileDA2);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) {
+            wxui::showMessage(this, "About NeoERF", std::string("NeoERF v") + neoerf::kVersion + "\nNative wxWidgets ERF/RIM archive editor\n\nA special thanks to everyone in the KOTOR modding community that has contributed their work, knowledge, and creativity to making tools, mods, and guides over the last 20+ years");
+        }, ID_About);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onQuit, this, ID_Quit);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onNew, this, ID_New);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onOpen, this, ID_Open);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onSave, this, ID_Save);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onSaveAs, this, ID_SaveAs);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onAdd, this, ID_Add);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onExtract, this, ID_Extract);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onDelete, this, ID_Delete);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onFind, this, ID_Find);
+        Bind(wxEVT_BUTTON, &NeoERFPanelImpl::onClearFilter, this, ID_ClearFilter);
+        documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, &NeoERFPanelImpl::onDocumentTabChanged, this);
+        documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CLOSE, &NeoERFPanelImpl::onDocumentTabCloseRequested, this);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onOpenSelectedMember, this, ID_OpenMember);
+        Bind(wxEVT_MENU, &NeoERFPanelImpl::onOpenWithMember, this, ID_OpenWithFirst, ID_OpenWithLast);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&){
+            if(!archive().loaded())return;
+            // Extract all includes resources hidden by the current filter.
+            clearAllFiltersAndRefresh();wxCommandEvent select;onSelectAll(select);onExtract(select);
+        },ID_ExtractAll);
+
+        list_->Bind(wxEVT_LIST_COL_CLICK, &NeoERFPanelImpl::onColumnClick, this);
+        list_->Bind(wxEVT_LIST_COL_RIGHT_CLICK, &NeoERFPanelImpl::onListColumnRightClick, this);
+        list_->Bind(wxEVT_LIST_ITEM_SELECTED, [this](wxListEvent&) { updateUiState(); });
+        list_->Bind(wxEVT_LIST_ITEM_DESELECTED, [this](wxListEvent&) { updateUiState(); });
+        list_->Bind(wxEVT_LIST_KEY_DOWN, &NeoERFPanelImpl::onListKeyDown, this);
+        list_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent& event) {
+            const auto i=list_->GetItemData(event.GetIndex());
+            if(i<displayRows_.size()&&memberOpen_.targets&&!memberOpen_.targets(displayRows_[i].restype).empty()) {
+                try{const auto row=displayRows_[i];openMember(row.filename(),row.restype);}catch(const std::exception& ex){wxui::showError(this,ex);}
+            } else {wxCommandEvent command;onExtract(command);}
+        });
+        list_->Bind(wxEVT_LIST_ITEM_RIGHT_CLICK, &NeoERFPanelImpl::onListContextMenu, this);
+
+        Bind(wxEVT_FIND, &NeoERFPanelImpl::onFindNext, this);
+        Bind(wxEVT_FIND_NEXT, &NeoERFPanelImpl::onFindNext, this);
+        Bind(wxEVT_FIND_CLOSE, &NeoERFPanelImpl::onFindClose, this);
+        if (filterText_) filterText_->Bind(wxEVT_TEXT, &NeoERFPanelImpl::onFilterText, this);
+    }
+
+    bool canDiscardDirty(const std::string& action) {
+        if (!archive().loaded() || !archive().dirty()) {
+            return true;
+        }
+        return wxui::confirm(this, "Unsaved Changes", "Are you sure you want to " + action + "? Unsaved changes in the current archive will be lost.");
+    }
+
+    void closeArchive(bool updateStatus = true) {
+        archive().reset();
+        viewState().resetForNewDocument();
+        if (filterText_) filterText_->ChangeValue("");
+        stagedRows().clear();
+        displayRows_.clear();
+        list_->DeleteAllItems();
+        setProgressVisible(false, 0);
+        if (updateStatus) {
+            setStatus("No file loaded.", "", "");
+        }
+        updateTitle();
+        updateUiState();
+    }
+
+    std::vector<long> selectedRows() const {
+        std::vector<long> rows;
+        long item = -1;
+        for (;;) {
+            item = list_->GetNextItem(item, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+            if (item < 0) {
+                break;
+            }
+            rows.push_back(item);
+        }
+        return rows;
+    }
+
+    std::vector<ResourceRow> canonicalResourceRows() const {
+        std::vector<ResourceRow> rows;
+        if (!archive().loaded()) {
+            return rows;
+        }
+        rows.reserve(archive().count() + stagedRows().size());
+        for (const auto& resource : archive().resources()) {
+            rows.push_back(ResourceRow{resource.resref, resource.filename, resource.extension(activeProfile()), resource.restype, resource.data_size, false});
+        }
+        for (auto row : stagedRows()) {
+            row.extension = extensionForType(row.restype);
+            rows.push_back(std::move(row));
+        }
+        return rows;
+    }
+
+    std::string resourceFilterCell(const ResourceRow& row, std::size_t logicalColumn) const {
+        switch (logicalColumn) {
+            case 0: return row.displayResRef();
+            case 1: return neoerf::ascii_upper(row.extension);
+            case 2: return formatSize(row.size);
+            default: return {};
+        }
+    }
+
+    std::vector<std::string> resourceVisibleRow(const ResourceRow& row) const {
+        return {resourceFilterCell(row, 0), resourceFilterCell(row, 1), resourceFilterCell(row, 2)};
+    }
+
+    bool resourceRowPassesCurrentFilters(const ResourceRow& row) const {
+        if (!viewState().filterTerm.empty()) {
+            Table table;
+            table.columns = {"Name", "ResRef", "Extension", "TypeId", "Size", "Staged"};
+            if (!rowMatches(table, resourceRow(row), viewState().filterTerm)) {
+                return false;
+            }
+        }
+        return neoview::rowPassesColumnFilters(viewState(), [&](std::size_t logicalColumn) {
+            return resourceFilterCell(row, logicalColumn);
+        });
+    }
+
+    void refreshList() {
+        displayRows_ = canonicalResourceRows();
+        neoview::removeColumnFiltersOutsideRange(viewState(), 3);
+        neoview::ensureIdentityColumns(viewState(), 3);
+        if (archive().loaded()) {
+            sortRows();
+            displayRows_.erase(std::remove_if(displayRows_.begin(), displayRows_.end(), [&](const ResourceRow& row) {
+                return !resourceRowPassesCurrentFilters(row);
+            }), displayRows_.end());
+        }
+        neoview::setIdentityRows(viewState(), displayRows_.size());
+        populateList();
+        updateUiState();
+    }
+
+    void updateListColumnLabels() {
+        for (std::size_t visualColumn = 0; visualColumn < 3; ++visualColumn) {
+            const std::size_t logicalColumn = neoview::logicalColumnForVisual(viewState(), visualColumn);
+            std::string label = resourceColumnLabel(logicalColumn);
+            if (neoview::findColumnFilter(viewState(), logicalColumn) != nullptr) {
+                label += " *";
+            }
+            wxListItem item;
+            item.SetMask(wxLIST_MASK_TEXT);
+            item.SetText(wxui::toWx(label));
+            list_->SetColumn(static_cast<int>(visualColumn), item);
+        }
+    }
+
+    void populateList() {
+        updateListColumnLabels();
+        list_->DeleteAllItems();
+        for (std::size_t i = 0; i < displayRows_.size(); ++i) {
+            const auto& item = displayRows_[i];
+            const long row = list_->InsertItem(static_cast<long>(i), wxui::toWx(resourceFilterCell(item, neoview::logicalColumnForVisual(viewState(), 0))));
+            list_->SetItem(row, 1, wxui::toWx(resourceFilterCell(item, neoview::logicalColumnForVisual(viewState(), 1))));
+            list_->SetItem(row, 2, wxui::toWx(resourceFilterCell(item, neoview::logicalColumnForVisual(viewState(), 2))));
+            list_->SetItemData(row, static_cast<long>(i));
+        }
+        wxui::applyTheme(list_, darkMode_);
+    }
+
+    void sortRows() {
+        const int column = viewState().sortColumn;
+        const bool ascending = viewState().sortAscending;
+        std::stable_sort(displayRows_.begin(), displayRows_.end(), [&](const ResourceRow& a, const ResourceRow& b) {
+            int cmp = 0;
+            if (column == 0) {
+                cmp = a.displayResRef().compare(b.displayResRef());
+            } else if (column == 1) {
+                cmp = a.extension.compare(b.extension);
+            } else {
+                cmp = (a.size < b.size) ? -1 : (a.size > b.size ? 1 : 0);
+            }
+            if (cmp == 0) {
+                cmp = a.filename().compare(b.filename());
+            }
+            return ascending ? cmp < 0 : cmp > 0;
+        });
+    }
+
+    std::string fileCountText() const {
+        if (!archive().loaded()) {
+            return "";
+        }
+        return std::to_string(archive().count() + archive().count_new()) + " files.";
+    }
+
+    std::string profileName() const {
+        switch (profile()) {
+            case neoerf::ResourceNameProfile::JadeEmpire: return "Jade Empire";
+            case neoerf::ResourceNameProfile::NeverwinterNights: return "Neverwinter Nights";
+            case neoerf::ResourceNameProfile::NeverwinterNights2: return "Neverwinter Nights 2";
+            case neoerf::ResourceNameProfile::Witcher: return "The Witcher";
+            case neoerf::ResourceNameProfile::DragonAgeOrigins: return "Dragon Age: Origins";
+            case neoerf::ResourceNameProfile::DragonAge2: return "Dragon Age II";
+            case neoerf::ResourceNameProfile::KotOR: break;
+        }
+        return "Knights of the Old Republic";
+    }
+
+    neoerf::ResourceNameProfile activeProfile() const {
+        return archive().loaded() ? archive().resource_type_profile() : profile();
+    }
+
+    std::string extensionForType(std::uint16_t type) const {
+        return neoerf::Resource::res_type_to_string(type, activeProfile());
+    }
+
+    void setResourceProfile(neoerf::ResourceNameProfile newProfile) {
+        if (archive().loaded() && archive().filename_based_resources()) {
+            newProfile = archive().resource_type_profile();
+        }
+        if (profile() == newProfile) {
+            applyResourceProfileMenu();
+            return;
+        }
+        profile() = newProfile;
+        archive().set_resource_type_profile(profile());
+        applyResourceProfileMenu();
+        for (auto& row : stagedRows()) {
+            row.extension = extensionForType(row.restype);
+        }
+        refreshList();
+        setStatus("Resource profile: " + profileName() + ".", archive().filename().filename().string(), fileCountText());
+    }
+
+    void applyResourceProfileMenu() {
+        if (profileKotORItem_ != nullptr) {
+            profileKotORItem_->Check(profile() == neoerf::ResourceNameProfile::KotOR);
+        }
+        if (profileJadeItem_ != nullptr) {
+            profileJadeItem_->Check(profile() == neoerf::ResourceNameProfile::JadeEmpire);
+        }
+        if (profileNWNItem_ != nullptr) {
+            profileNWNItem_->Check(profile() == neoerf::ResourceNameProfile::NeverwinterNights);
+        }
+        if (profileNWN2Item_ != nullptr) {
+            profileNWN2Item_->Check(profile() == neoerf::ResourceNameProfile::NeverwinterNights2);
+        }
+        if (profileWitcherItem_ != nullptr) {
+            profileWitcherItem_->Check(profile() == neoerf::ResourceNameProfile::Witcher);
+        }
+        if (profileDAOItem_ != nullptr) {
+            profileDAOItem_->Check(profile() == neoerf::ResourceNameProfile::DragonAgeOrigins);
+        }
+        if (profileDA2Item_ != nullptr) {
+            profileDA2Item_->Check(profile() == neoerf::ResourceNameProfile::DragonAge2);
+        }
+    }
+
+    void setStatus(const std::string& left, const std::string& middle, const std::string& right) {
+        std::string statusLeft = left;
+        const std::string summary = neoview::columnFilterSummary(viewState());
+        if (!summary.empty()) {
+            statusLeft += "; filters: " + summary;
+        }
+        setModuleStatusText(wxui::toWx(statusLeft), 0);
+        setModuleStatusText(wxui::toWx(middle), 1);
+        setModuleStatusText(wxui::toWx(right), 2);
+    }
+
+    void setProgressVisible(bool visible, std::size_t max) {
+        gauge_->SetValue(0);
+        gauge_->SetRange(static_cast<int>(std::max<std::size_t>(max, 1)));
+        gauge_->Show(visible);
+        Layout();
+    }
+
+    void updateProgress(std::size_t value) {
+        gauge_->SetValue(static_cast<int>(value));
+#if !defined(__EMSCRIPTEN__)
+        gauge_->Update();
+#endif
+    }
+
+    void updateTitle() {
+        if (!archive().loaded()) {
+            setModuleTitle(wxui::toWx(appTitle()));
+            updateActiveTabTitle();
+            return;
+        }
+        std::string title = appTitle() + " - " + archive().filename().string();
+        if (activeDocument().model.needsSave()) {
+            title += "*";
+        }
+        setModuleTitle(wxui::toWx(title));
+        updateActiveTabTitle();
+    }
+
+    void enableAction(int id, bool enabled) {
+        enableModuleCommand(id,enabled);
+        if (wxWindow* control = FindWindow(id); control != nullptr) {
+            control->Enable(enabled);
+        }
+    }
+
+    void updateUiState() {
+        const bool loaded = archive().loaded();
+        const bool dirty = loaded && (activeDocument().model.needsSave()||activeDocument().model.detached());
+        const bool hasSelection = !selectedRows().empty();
+#if defined(__EMSCRIPTEN__)
+        const bool browserImportBusy = browserResourceImport_ != nullptr;
+        const bool browserDeleteBusy = browserResourceDelete_ != nullptr;
+        const bool browserSaveBusy = browserArchiveSave_ != nullptr ||
+                                     browserSaveAsDialog_ != nullptr;
+        const bool browserPatcherBusy = browserPatcherExport_ != nullptr;
+        const bool browserMutationBusy = browserImportBusy || browserDeleteBusy ||
+                                         browserSaveBusy || browserPatcherBusy;
+#else
+        constexpr bool browserMutationBusy = false;
+#endif
+
+        enableAction(ID_New, !browserMutationBusy);
+        enableAction(ID_Open, !browserMutationBusy);
+        enableAction(ID_CloseTab, !browserMutationBusy);
+        enableAction(ID_CloseOtherTabs, !browserMutationBusy);
+        enableAction(ID_NextTab, !browserMutationBusy && documents_.size() > 1);
+        enableAction(ID_PreviousTab, !browserMutationBusy && documents_.size() > 1);
+#if defined(__EMSCRIPTEN__)
+        // Save is also the browser's download command. Keep it available for a
+        // loaded clean archive so a failed or dismissed download can be prepared
+        // again without modifying the document first.
+        enableAction(ID_Save, loaded && !browserMutationBusy);
+#else
+        enableAction(ID_Save, dirty && !browserMutationBusy);
+#endif
+        enableAction(ID_SaveAs, loaded && !browserMutationBusy);
+        const bool patcherArchive = loaded &&
+            profile() == neoerf::ResourceNameProfile::KotOR &&
+            !archive().filename_based_resources() &&
+            !archive().extended_resrefs() &&
+            (archive().disk_format() == neoerf::ArchiveDiskFormat::ErfV1 ||
+             archive().disk_format() == neoerf::ArchiveDiskFormat::RimV1);
+        enableAction(ID_ExportArchivePatcher, patcherArchive && !browserMutationBusy);
+        enableAction(ID_Add, loaded && !browserMutationBusy);
+        enableAction(ID_CopyCells, loaded && hasSelection && !browserMutationBusy);
+        enableAction(ID_PasteCells, loaded && !browserMutationBusy);
+        enableAction(ID_Filter, loaded && !browserMutationBusy);
+        enableAction(ID_ClearFilter, loaded && !browserMutationBusy);
+        enableAction(ID_FilterColumn, loaded && !displayRows_.empty() && !browserMutationBusy);
+        enableAction(ID_ClearColumnFilter, loaded && !displayRows_.empty() && !browserMutationBusy);
+        enableAction(ID_ClearAllFilters, loaded && neoview::hasAnyFilter(viewState()) && !browserMutationBusy);
+        enableAction(ID_ResetColumnOrder, loaded && !browserMutationBusy);
+        enableAction(ID_ResetRowOrder, loaded && !browserMutationBusy);
+        enableAction(ID_Extract, loaded && hasSelection && !browserMutationBusy);
+        enableAction(ID_Delete, loaded && hasSelection && !browserMutationBusy);
+        enableAction(ID_Find, loaded && !displayRows_.empty() && !browserMutationBusy);
+        enableAction(ID_SelectAll, loaded && !displayRows_.empty() && !browserMutationBusy);
+        enableAction(ID_ExtractAll,loaded&&!displayRows_.empty()&&!browserMutationBusy);
+        enableAction(ID_OpenMember,loaded&&hasSelection&&bool(memberOpen_.open)&&!browserMutationBusy);
+
+        if (filePath_) {
+            const std::string path = loaded ? archive().filename().string() : std::string();
+            if (wxui::toStd(filePath_->GetValue()) != path) filePath_->ChangeValue(wxui::toWx(path));
+        }
+        if (filterText_) filterText_->Enable(loaded && !browserMutationBusy);
+        if (insertButton_) insertButton_->Enable(loaded && !browserMutationBusy);
+        if (extractButton_) extractButton_->Enable(loaded && hasSelection && !browserMutationBusy);
+        if (deleteButton_) deleteButton_->Enable(loaded && hasSelection && !browserMutationBusy);
+        if (findButton_) findButton_->Enable(loaded && !displayRows_.empty() && !browserMutationBusy);
+        if (list_) list_->Enable(loaded && !browserMutationBusy);
+        if (documentTabs_) documentTabs_->Enable(!browserMutationBusy);
+    }
+
+
+    std::vector<std::string> resourceRow(const ResourceRow& row) const {
+        return {row.filename(), row.resref, row.extension, std::to_string(row.restype), std::to_string(row.size), row.staged ? "yes" : "no"};
+    }
+
+std::vector<std::filesystem::path> filesFromManifest(const Table& table) const {
+        const auto fileCol = optionalColumn(table, "File");
+        const auto nameCol = optionalColumn(table, "Name");
+        std::vector<std::filesystem::path> files;
+        for (const auto& row : table.rows) {
+            std::string file = tableCell(row, fileCol);
+            if (file.empty()) file = tableCell(row, nameCol);
+            if (!file.empty()) files.emplace_back(file);
+        }
+        return files;
+    }
+
+    void setFilterTerm(std::string term) {
+        viewState().filterTerm = std::move(term);
+        if (filterText_ && wxui::toStd(filterText_->GetValue()) != viewState().filterTerm) filterText_->ChangeValue(wxui::toWx(viewState().filterTerm));
+        refreshList();
+    }
+
+    void onFilterText(wxCommandEvent&) { setFilterTerm(filterText_ ? wxui::toStd(filterText_->GetValue()) : std::string()); }
+    void onFilterPrompt(wxCommandEvent&) {
+        const auto term = wxui::promptText(this, "Filter/Search", "Search term:", viewState().filterTerm);
+        if (term) setFilterTerm(*term);
+    }
+
+    void clearAllFiltersAndRefresh() {
+        neoview::clearAllFilters(viewState());
+        if (filterText_) filterText_->ChangeValue("");
+        refreshList();
+    }
+
+    int selectedVisualColumn() const {
+        long selected = list_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+        if (selected >= 0) {
+            return 0;
+        }
+        return contextVisualColumn_ >= 0 ? contextVisualColumn_ : 0;
+    }
+
+    void promptColumnFilterForVisualColumn(int visualColumn) {
+        if (!archive().loaded()) {
+            throw std::runtime_error("No archive loaded.");
+        }
+        const std::size_t logicalColumn = neoview::logicalColumnForVisual(viewState(), static_cast<std::size_t>(std::max(0, visualColumn)));
+        const auto* existing = neoview::findColumnFilter(viewState(), logicalColumn);
+        const std::string prior = existing != nullptr ? existing->term : std::string();
+        const auto term = wxui::promptText(this, "Column Filter", "Show rows where " + resourceColumnLabel(logicalColumn) + " contains:", prior);
+        if (!term) return;
+        if (neoview::trimmedCopy(*term).empty()) {
+            neoview::clearColumnFilter(viewState(), logicalColumn);
+        } else {
+            neoview::setColumnFilter(viewState(), neoview::ColumnFilter{logicalColumn, resourceColumnLabel(logicalColumn), *term, neoview::TextFilterMode::Contains, true});
+        }
+        refreshList();
+    }
+
+    void onClearFilter(wxCommandEvent&) { clearAllFiltersAndRefresh(); }
+    void onFilterSelectedColumn(wxCommandEvent&) {
+        try { promptColumnFilterForVisualColumn(selectedVisualColumn()); } catch (const std::exception& ex) { wxui::showError(this, ex); }
+    }
+    void onClearSelectedColumnFilter(wxCommandEvent&) {
+        const std::size_t logicalColumn = neoview::logicalColumnForVisual(viewState(), static_cast<std::size_t>(std::max(0, selectedVisualColumn())));
+        neoview::clearColumnFilter(viewState(), logicalColumn);
+        refreshList();
+    }
+    void onClearAllFilters(wxCommandEvent&) { clearAllFiltersAndRefresh(); }
+    void onResetColumnOrder(wxCommandEvent&) { neoview::setIdentityColumns(viewState(), 3); refreshList(); }
+    void onResetRowOrder(wxCommandEvent&) { viewState().sortColumn = 0; viewState().sortAscending = true; refreshList(); }
+
+void onCopyCells(wxCommandEvent&) {
+        try {
+            Table table;
+            table.columns = {"Name", "ResRef", "Extension", "TypeId", "Size", "Staged", "File"};
+            for (long row : selectedRows()) {
+                if (row < 0 || static_cast<std::size_t>(row) >= displayRows_.size()) continue;
+                auto cells = resourceRow(displayRows_[static_cast<std::size_t>(row)]);
+                cells.push_back({});
+                table.rows.push_back(std::move(cells));
+            }
+            if (table.rows.empty()) return;
+            if (wxTheClipboard->Open()) {
+                wxTheClipboard->SetData(new wxTextDataObject(wxui::toWx(serializeClipboardTable(table))));
+                wxTheClipboard->Close();
+            }
+        } catch (const std::exception& ex) { wxui::showError(this, ex); }
+    }
+
+    void onPasteCells(wxCommandEvent&) {
+        try {
+            if (!archive().loaded()) throw std::runtime_error("No archive loaded.");
+            if (!wxTheClipboard->Open()) return;
+            wxTextDataObject data;
+            const bool ok = wxTheClipboard->GetData(data);
+            wxTheClipboard->Close();
+            if (!ok) return;
+            auto files = filesFromManifest(parseClipboardTable(wxui::toStd(data.GetText())));
+            if (!files.empty()) insertResources(files);
+        } catch (const std::exception& ex) { wxui::showError(this, ex); }
+    }
+
+    void eraseStagedDisplayRow(const std::string& resrefOrName, std::uint16_t restype) {
+        stagedRows().erase(std::remove_if(stagedRows().begin(), stagedRows().end(), [&](const ResourceRow& row) {
+                              if (archive().filename_based_resources()) {
+                                  return neoerf::ascii_lower(row.filename()) == neoerf::ascii_lower(resrefOrName);
+                              }
+                              return neoerf::ascii_lower(row.resref) == neoerf::ascii_lower(resrefOrName) && row.restype == restype;
+                          }),
+                          stagedRows().end());
+    }
+
+    void onNew(wxCommandEvent&) {
+        try {
+            const auto file = wxui::chooseSaveFile(this, "Create archive", kArchiveWildcard, "new.erf");
+            if (!file) {
+                return;
+            }
+            auto type=neoerf::archive_type_from_extension(*file);
+            if(profile()==neoerf::ResourceNameProfile::DragonAgeOrigins)type=neoerf::ArchiveType::ERF_V2;
+            else if(profile()==neoerf::ResourceNameProfile::DragonAge2)type=neoerf::ArchiveType::ERF_V3;
+            newArchive(*file,type);
+#if defined(__EMSCRIPTEN__)
+            setStatus("New archive initialized. Use Save to download it.", file->filename().string(), fileCountText());
+#else
+            setStatus("New archive staged. Save to create " + file->filename().string() + ".", file->filename().string(), fileCountText());
+#endif
+            updateTitle();
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
+    }
+
+    void chooseAndOpenArchive(
+        const std::filesystem::path& initialDirectory = {},
+        std::optional<neoerf::ResourceNameProfile> requestedProfile = std::nullopt) {
+        wxui::requestOpenFile(
+            this,
+            "Open ERF/RIM archive",
+            kArchiveWildcard,
+            initialDirectory,
+            [this, requestedProfile](std::optional<std::filesystem::path> file) {
+                if (!file || IsBeingDeleted()) return;
+                openArchive(*file, true, requestedProfile);
+            });
+    }
+
+    void onOpen(wxCommandEvent&) {
+        chooseAndOpenArchive();
+    }
+
+    void onSave(wxCommandEvent&) {
+#if defined(__EMSCRIPTEN__)
+        if (!archive().loaded()) {
+            wxui::showMessage(this, "Save Archive", "No archive is loaded.");
+            return;
+        }
+        beginBrowserArchiveSave(neoerf::filename_string(archive().filename()));
+#else
+        try {
+            if (!archive().loaded()) {
+                throw std::runtime_error("No archive loaded.");
+            }
+            if (activeDocument().model.detached()) { wxCommandEvent command;onSaveAs(command);return; }
+            if (!activeDocument().model.needsSave()) return;
+            setProgressVisible(true, 1);
+            saveActiveAs(activeDocument().model.path());
+            stagedRows().clear();
+            refreshList();
+            rememberRecentFile(archive().filename());
+            neogames::resolver().inferFromOpenedPath(archive().filename());
+            updateTitle();
+            setProgressVisible(false, 0);
+            setStatus("Changes saved to file " + archive().filename().filename().string() + ".",
+                      archive().filename().filename().string(),
+                      fileCountText());
+        } catch (const std::exception& ex) {
+            setProgressVisible(false, 0);
+            wxui::showError(this, ex);
+        }
+#endif
+    }
+
+    void onSaveAs(wxCommandEvent&) {
+#if defined(__EMSCRIPTEN__)
+        showBrowserSaveAsDialog();
+#else
+        try {
+            if (!archive().loaded()) {
+                throw std::runtime_error("No archive loaded.");
+            }
+            const auto file = wxui::chooseSaveFile(
+                this,
+                "Save archive as",
+                kArchiveWildcard,
+                archive().filename().filename().string());
+            if (!file) {
+                return;
+            }
+            setProgressVisible(true, 1);
+            saveActiveAs(*file);
+            stagedRows().clear();
+            refreshList();
+            rememberRecentFile(archive().filename());
+            neogames::resolver().inferFromOpenedPath(archive().filename());
+            updateTitle();
+            setProgressVisible(false, 0);
+            setStatus("File saved as " + archive().filename().filename().string() + ".",
+                      archive().filename().filename().string(),
+                      fileCountText());
+        } catch (const std::exception& ex) {
+            setProgressVisible(false, 0);
+            wxui::showError(this, ex);
+        }
+#endif
+    }
+
+    void exportArchivePatcherFromOriginal(const std::filesystem::path& originalPath) {
+        try {
+            if (!archive().loaded()) {
+                throw std::runtime_error("No archive is loaded.");
+            }
+
+            std::string defaultTarget = archive().filename().filename().string();
+            if (extensionNoDot(archive().filename()) == "mod") {
+                defaultTarget = "Modules\\" + defaultTarget;
+            }
+            const auto targetPath = wxui::promptText(
+                this,
+                "Target Archive Path",
+                "Enter the target archive path relative to the game folder (for example Modules\\foo.mod):",
+                defaultTarget);
+            if (!targetPath) return;
+
+            neoerf::ErfArchive original;
+            original.set_resource_type_profile(neoerf::ResourceNameProfile::KotOR);
+            original.load(originalPath);
+            auto result = neoerf::diffArchivePatcher(original, archive(), *targetPath);
+            neotsl::throwIfUnsupported(result.project);
+
+            if (!result.project.warnings.empty()) {
+                std::ostringstream warning;
+                warning << "NeoERF will install " << result.installCount() << " new resource(s) and replace "
+                        << result.replacementCount() << " complete resource(s).\n\n";
+                for (const auto& item : result.project.warnings) warning << "- " << item << "\n";
+                warning << "\nContinue?";
+                if (!wxui::confirm(this, "Archive Resource Patch Warning", warning.str())) return;
+            }
+
+            const auto output = wxui::choosePatcherOutput(
+                this, {}, "changes.ini", true);
+            if (!output) return;
+
+            if (!output->writesToIni()) {
+                std::vector<std::string> payloadNames;
+                payloadNames.reserve(result.changes.size());
+                for (const auto& change : result.changes) payloadNames.push_back(change.payloadName);
+                wxui::showIniFragmentDialog(
+                    this,
+                    "Archive Patcher INI Fragment",
+                    result.project,
+                    payloadNames);
+                return;
+            }
+
+#if defined(__EMSCRIPTEN__)
+            beginBrowserPatcherExport(std::move(result), *output);
+#else
+            const bool mergedExisting = std::filesystem::exists(output->iniPath);
+            checkDestination(output->iniPath,true);
+            neoerf::writeArchivePatcherPackageToIni(result, archive(), output->iniPath, false);
+            setStatus("Patcher package exported.", archive().filename().filename().string(),
+                      std::to_string(result.installCount()) + " added, " +
+                          std::to_string(result.replacementCount()) + " replaced");
+            wxui::showMessage(
+                this,
+                "Patcher Package Exported",
+                std::string(mergedExisting ? "Merged archive instructions into:\n"
+                                           : "Created the installer INI:\n") +
+                    neosettings::pathToUtf8(output->iniPath) + "\n\nStaged " +
+                    std::to_string(result.changes.size()) +
+                    " resource payload(s) beside the selected INI.");
+#endif
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
+    }
+
+    void onExportArchivePatcher(wxCommandEvent&) {
+        try {
+            if (!archive().loaded()) {
+                throw std::runtime_error("No archive is loaded.");
+            }
+            if (archive().dirty()) {
+                throw std::runtime_error(
+                    "Save the active archive before exporting patcher instructions so the modified archive on disk matches the active tab.");
+            }
+            if (profile() != neoerf::ResourceNameProfile::KotOR || archive().filename_based_resources() ||
+                archive().extended_resrefs() ||
+                (archive().disk_format() != neoerf::ArchiveDiskFormat::ErfV1 &&
+                 archive().disk_format() != neoerf::ArchiveDiskFormat::RimV1)) {
+                throw std::runtime_error(
+                    "NeoERF patcher export supports KotOR/KotOR II ERF, RIM, and MOD archives with 16-byte ResRefs only.");
+            }
+
+            wxWeakRef<NeoERFPanelImpl> weakThis(this);
+            wxWeakRef<wxWindow> targetPage(activeDocument().tabPage);
+            neoerf::ErfArchive* const targetArchiveObject = &activeDocument().model.archive();
+            const std::filesystem::path targetArchivePath = archive().filename();
+            wxui::requestOpenFile(
+                this,
+                "Select the clean original archive",
+                kArchiveWildcard,
+                [weakThis, targetPage, targetArchiveObject, targetArchivePath](
+                    std::optional<std::filesystem::path> originalPath) {
+                    if (!originalPath || !weakThis || !targetPage) return;
+                    NeoERFPanelImpl* frame = weakThis.get();
+                    if (frame->IsBeingDeleted()) return;
+                    if (!frame->hasActiveDocument() ||
+                        frame->activeDocument().tabPage != targetPage.get() ||
+                        &frame->activeDocument().model.archive() != targetArchiveObject ||
+                        !frame->archive().loaded() ||
+                        frame->archive().filename() != targetArchivePath) {
+                        if (frame->hasActiveDocument() && frame->archive().loaded()) {
+                            frame->setStatus(
+                                "Patcher export was cancelled because the initiating archive is no longer active.",
+                                neoerf::filename_string(frame->archive().filename()),
+                                frame->fileCountText());
+                        }
+                        return;
+                    }
+                    frame->exportArchivePatcherFromOriginal(*originalPath);
+                });
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
+    }
+
+    void onAdd(wxCommandEvent&) {
+        if (!archive().loaded()) {
+            return;
+        }
+#if defined(__EMSCRIPTEN__)
+        if (browserResourceImport_) {
+            setStatus(
+                "A resource import is already in progress.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+        if (browserResourceDelete_) {
+            setStatus(
+                "Finish removing the selected resources before adding more files.",
+                neoerf::filename_string(archive().filename()),
+                fileCountText());
+            return;
+        }
+        wxWindow* const targetPage = activeDocument().tabPage;
+        const std::filesystem::path targetArchive = archive().filename();
+        wxui::requestOpenFiles(
+            this,
+            "Add resources",
+            kAllFilesWildcard,
+            [this, targetPage, targetArchive](std::vector<std::filesystem::path> files) {
+                if (files.empty() || IsBeingDeleted()) return;
+                if (!hasActiveDocument() ||
+                    activeDocument().tabPage != targetPage ||
+                    !archive().loaded() ||
+                    archive().filename() != targetArchive) {
+                    setStatus(
+                        "Resources were not added because the active archive changed while the file picker was open.",
+                        hasActiveDocument() && archive().loaded()
+                            ? neoerf::filename_string(archive().filename())
+                            : std::string{},
+                        hasActiveDocument() && archive().loaded()
+                            ? fileCountText()
+                            : std::string{});
+                    return;
+                }
+                insertResources(files);
+            });
+#else
+        wxui::requestOpenFiles(
+            this,
+            "Add resources",
+            kAllFilesWildcard,
+            [this](std::vector<std::filesystem::path> files) {
+                if (files.empty() || IsBeingDeleted()) return;
+                insertResources(files);
+            });
+#endif
+    }
+
+    void onExtract(wxCommandEvent&) {
+        try {
+            if (!archive().loaded()) {
+                throw std::runtime_error("No archive loaded.");
+            }
+            const auto rows = selectedRows();
+            if (rows.empty()) {
+                throw std::runtime_error("Select one or more resources first.");
+            }
+#if defined(__EMSCRIPTEN__)
+            if (rows.size() != 1) {
+                throw std::runtime_error(
+                    "The browser build can download one extracted resource at a time. Use a desktop build for directory-wide or multi-resource extraction.");
+            }
+            const long data = list_->GetItemData(rows.front());
+            if (data < 0 || static_cast<std::size_t>(data) >= displayRows_.size()) {
+                throw std::runtime_error("The selected resource is no longer available.");
+            }
+            const auto row = displayRows_[static_cast<std::size_t>(data)];
+
+            const bool filenameBased = archive().filename_based_resources();
+            const std::string outputName = neoerf::ascii_lower(row.filename());
+            const std::string archiveName = archive().filename().filename().string();
+            const std::filesystem::path activeArchive = archive().filename();
+            setStatus("Preparing " + outputName + "...", archiveName, fileCountText());
+
+            // Leave the synchronous wxWidgets-WASM DOM event before reading or
+            // decompressing the resource. The browser port enters button/menu
+            // handlers through a synchronous ccall; doing filesystem durability
+            // work or opening a native save picker in that chain can strand its
+            // event-dispatch interlock and make the whole application appear frozen.
+            wxWeakRef<NeoERFPanelImpl> weakThis(this);
+            wxTheApp->CallAfter(
+                [weakThis, row, filenameBased, outputName, archiveName, activeArchive]() mutable {
+                    if (!weakThis) return;
+                    NeoERFPanelImpl* frame = weakThis.get();
+                    if (frame->IsBeingDeleted()) return;
+                    try {
+                        if (!frame->archive().loaded() ||
+                            frame->archive().filename() != activeArchive) {
+                            throw std::runtime_error(
+                                "The active archive changed before extraction completed. Select the resource again.");
+                        }
+
+                        (void)filenameBased;
+                        std::vector<std::uint8_t> bytes=frame->archive().read_current_resource(row.filename());
+                        if (!neobrowser::prepareDownloadBytes(
+                                bytes.empty() ? nullptr : bytes.data(),
+                                bytes.size(),
+                                outputName)) {
+                            throw std::runtime_error(
+                                "The browser could not prepare the extracted resource for download.");
+                        }
+
+                        frame->setStatus(
+                            "Resource ready. Use the Download " + outputName +
+                                " action shown above the editor.",
+                            archiveName,
+                            frame->fileCountText());
+                    } catch (const std::exception& ex) {
+                        if (!weakThis || frame->IsBeingDeleted()) return;
+                        frame->setStatus(
+                            "Resource extraction failed.",
+                            archiveName,
+                            frame->fileCountText());
+                        wxui::showError(frame, ex);
+                    }
+                });
+            return;
+#endif
+            const auto directory = chooseDirectory(this, "Select a folder to extract selected resources to:");
+            if (!directory) {
+                return;
+            }
+
+            std::size_t extracted = 0;
+            setProgressVisible(true, rows.size());
+            for (std::size_t i = 0; i < rows.size(); ++i) {
+                updateProgress(i + 1);
+                const long data = list_->GetItemData(rows[i]);
+                if (data < 0 || static_cast<std::size_t>(data) >= displayRows_.size()) {
+                    continue;
+                }
+                const auto& row = displayRows_[static_cast<std::size_t>(data)];
+                const auto out = *directory / std::filesystem::path(row.filename()).filename();
+                checkDestination(out,true);
+                if(std::filesystem::exists(out)&&!wxui::confirm(this,"Replace extracted resource", "Replace " + out.u8string() + "?")) continue;
+                activeDocument().model.extract(row.filename(),out);
+                ++extracted;
+            }
+            setProgressVisible(false, 0);
+            setStatus(extracted == 1 ? "1 resource extracted." : std::to_string(extracted) + " resources extracted.",
+                      archive().filename().filename().string(), fileCountText());
+        } catch (const std::exception& ex) {
+            setProgressVisible(false, 0);
+            wxui::showError(this, ex);
+        }
+    }
+
+    void onDelete(wxCommandEvent&) {
+        try {
+            if (!archive().loaded()) {
+                throw std::runtime_error("No archive loaded.");
+            }
+            auto rows = selectedRows();
+            if (rows.empty()) {
+                throw std::runtime_error("Select one or more resources first.");
+            }
+#if defined(__EMSCRIPTEN__)
+            if (browserResourceImport_) {
+                setStatus(
+                    "Finish the current resource import before removing resources.",
+                    neoerf::filename_string(archive().filename()),
+                    fileCountText());
+                return;
+            }
+            if (browserResourceDelete_) {
+                setStatus(
+                    "A resource removal is already in progress.",
+                    neoerf::filename_string(archive().filename()),
+                    fileCountText());
+                return;
+            }
+
+            std::vector<ResourceRow> resources;
+            resources.reserve(rows.size());
+            for (long visualRow : rows) {
+                const long data = list_->GetItemData(visualRow);
+                if (data < 0 || static_cast<std::size_t>(data) >= displayRows_.size()) {
+                    continue;
+                }
+                resources.push_back(displayRows_[static_cast<std::size_t>(data)]);
+            }
+            if (resources.empty()) {
+                throw std::runtime_error("The selected resources are no longer available.");
+            }
+            beginBrowserResourceDelete(std::move(resources));
+            return;
+#else
+            if (!wxui::confirm(this, "Delete Resources", "Are you sure you wish to remove the selected resources?")) {
+                return;
+            }
+            std::sort(rows.rbegin(), rows.rend());
+            std::size_t deleted = 0;
+            setProgressVisible(true, rows.size());
+            for (std::size_t i = 0; i < rows.size(); ++i) {
+                updateProgress(i + 1);
+                const long data = list_->GetItemData(rows[i]);
+                if (data < 0 || static_cast<std::size_t>(data) >= displayRows_.size()) {
+                    continue;
+                }
+                const auto row = displayRows_[static_cast<std::size_t>(data)];
+                if (archive().filename_based_resources()) {
+                    archive().delete_resource_by_name(row.filename());
+                    if (row.staged) {
+                        eraseStagedDisplayRow(row.filename(), row.restype);
+                    }
+                } else {
+                    archive().delete_resource(row.staged ? row.resref + "*" : row.resref, row.restype);
+                    if (row.staged) {
+                        eraseStagedDisplayRow(row.resref, row.restype);
+                    }
+                }
+                ++deleted;
+            }
+            refreshList();
+            setProgressVisible(false, 0);
+            setStatus(deleted == 1 ? "1 resource deleted." : std::to_string(deleted) + " resources deleted.",
+                      archive().filename().filename().string(), fileCountText());
+            updateTitle();
+#endif
+        } catch (const std::exception& ex) {
+            setProgressVisible(false, 0);
+            wxui::showError(this, ex);
+        }
+    }
+
+    void onFind(wxCommandEvent&) {
+        if (!findData_) {
+            findData_ = std::make_unique<wxFindReplaceData>(wxFR_DOWN);
+        }
+        if (findDialog_) {
+            findDialog_->Raise();
+            return;
+        }
+        findDialog_ = new wxFindReplaceDialog(this, findData_.get(), "Find in list");
+        findDialog_->Show(true);
+    }
+
+    void onFindNext(wxFindDialogEvent& event) {
+        const std::string needle = wxui::toStd(event.GetFindString());
+        if (needle.empty() || displayRows_.empty()) {
+            return;
+        }
+        const bool matchCase = (event.GetFlags() & wxFR_MATCHCASE) != 0;
+        const bool wholeWord = (event.GetFlags() & wxFR_WHOLEWORD) != 0;
+        const bool down = (event.GetFlags() & wxFR_DOWN) != 0;
+        if (findFromSelection(needle, matchCase, wholeWord, down)) {
+            list_->SetFocus();
+        } else {
+            wxui::showMessage(this, "Find", "No resources found matching the specified search criteria.");
+        }
+    }
+
+    bool findFromSelection(std::string needle, bool matchCase, bool wholeWord, bool down) {
+        if (!matchCase) {
+            needle = neoerf::ascii_lower(needle);
+        }
+        long selected = list_->GetNextItem(-1, wxLIST_NEXT_ALL, wxLIST_STATE_SELECTED);
+        if (selected < 0) {
+            selected = down ? -1 : static_cast<long>(displayRows_.size());
+        }
+        auto matches = [&](const ResourceRow& row) {
+            std::string haystack = row.displayResRef();
+            if (!matchCase) {
+                haystack = neoerf::ascii_lower(haystack);
+            }
+            return wholeWord ? haystack == needle : haystack.find(needle) != std::string::npos;
+        };
+        if (down) {
+            for (long i = selected + 1; i < static_cast<long>(displayRows_.size()); ++i) {
+                if (matches(displayRows_[static_cast<std::size_t>(i)])) {
+                    list_->SetItemState(-1, 0, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+                    wxui::selectRow(*list_, i);
+                    return true;
+                }
+            }
+        } else {
+            for (long i = selected - 1; i >= 0; --i) {
+                if (matches(displayRows_[static_cast<std::size_t>(i)])) {
+                    list_->SetItemState(-1, 0, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+                    wxui::selectRow(*list_, i);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    void onFindClose(wxFindDialogEvent&) {
+        if (findDialog_) {
+            findDialog_->Destroy();
+            findDialog_ = nullptr;
+        }
+    }
+
+    void onSelectAll(wxCommandEvent&) {
+        for (long row = 0; row < list_->GetItemCount(); ++row) {
+            list_->SetItemState(row, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
+        }
+        updateUiState();
+    }
+
+    void onCloseTab(wxCommandEvent&) { closeDocumentTab(activeDocumentIndex_); }
+
+    void onCloseOtherTabs(wxCommandEvent&) {
+        if (!hasActiveDocument()) return;
+        for (std::size_t i = documents_.size(); i-- > 0;) {
+            if (i != activeDocumentIndex_ && !closeDocumentTab(i)) return;
+        }
+    }
+
+    void onNextTab(wxCommandEvent&) {
+        if (documentTabs_ == nullptr || documentTabs_->GetPageCount() < 2) return;
+        tabSwitchInProgress_ = true;
+        documentTabs_->AdvanceSelection(true);
+        tabSwitchInProgress_ = false;
+        const std::size_t index = neotabs::findDocumentIndexForPage(
+            documents_, neotabs::currentPage(documentTabs_));
+        if (index != neotabs::npos) selectDocumentTab(index);
+    }
+
+    void onPreviousTab(wxCommandEvent&) {
+        if (documentTabs_ == nullptr || documentTabs_->GetPageCount() < 2) return;
+        tabSwitchInProgress_ = true;
+        documentTabs_->AdvanceSelection(false);
+        tabSwitchInProgress_ = false;
+        const std::size_t index = neotabs::findDocumentIndexForPage(
+            documents_, neotabs::currentPage(documentTabs_));
+        if (index != neotabs::npos) selectDocumentTab(index);
+    }
+
+    void onQuit(wxCommandEvent&) {
+        requestModuleClose();
+    }
+
+    void applyDarkMode() {
+        if (darkModeItem_ != nullptr) {
+            darkModeItem_->Check(darkMode_);
+        }
+        wxui::applyTheme(this, darkMode_);
+        if (list_ != nullptr) {
+            wxui::applyListTheme(*list_, darkMode_);
+        }
+        applyFontScale();
+    }
+
+    void applyFontScale() {
+        neoview::applyFontScale(this, fontScale_);
+        layoutColumns();
+    }
+
+    void changeFontScaleSteps(int steps) {
+        const double next = neoview::steppedFontScale(fontScale_, steps);
+        if (neoview::fontScalePercent(next) == neoview::fontScalePercent(fontScale_)) return;
+        fontScale_ = next;
+        settings_.setFontScale(fontScale_);
+        applyFontScale();
+    }
+
+    void onToggleDarkMode(wxCommandEvent& event) {
+        darkMode_ = event.IsChecked();
+        wxui::writeDarkMode(kAppName, darkMode_);
+        applyDarkMode();
+    }
+
+    void onIncreaseFontScale(wxCommandEvent&) {
+        fontScaleWheelFilter_.reset();
+        changeFontScaleSteps(1);
+    }
+    void onDecreaseFontScale(wxCommandEvent&) {
+        fontScaleWheelFilter_.reset();
+        changeFontScaleSteps(-1);
+    }
+    void onResetFontScale(wxCommandEvent&) {
+        fontScaleWheelFilter_.reset();
+        fontScale_ = neoview::kDefaultFontScale;
+        settings_.setFontScale(fontScale_);
+        applyFontScale();
+    }
+
+
+
+    void onColumnClick(wxListEvent& event) {
+        const int visualColumn = event.GetColumn();
+        const int column = static_cast<int>(neoview::logicalColumnForVisual(viewState(), static_cast<std::size_t>(std::max(0, visualColumn))));
+        if (viewState().sortColumn == column) {
+            viewState().sortAscending = !viewState().sortAscending;
+        } else {
+            viewState().sortColumn = column;
+            viewState().sortAscending = true;
+        }
+        refreshList();
+    }
+
+    void onListColumnRightClick(wxListEvent& event) {
+        contextVisualColumn_ = event.GetColumn();
+        wxMenu menu;
+        menu.Append(ID_FilterColumn, "Filter This Column...");
+        menu.Append(ID_ClearColumnFilter, "Clear Filter on This Column");
+        menu.AppendSeparator();
+        menu.Append(ID_ClearAllFilters, "Clear All Filters");
+        PopupMenu(&menu);
+    }
+
+    void onListKeyDown(wxListEvent& event) {
+        const int key = event.GetKeyCode();
+        if (key == WXK_DELETE || key == WXK_BACK) {
+            wxCommandEvent deleteEvent(wxEVT_MENU, ID_Delete);
+            onDelete(deleteEvent);
+        } else {
+            event.Skip();
+        }
+    }
+
+    void onListContextMenu(wxListEvent& event) {
+        if(event.GetIndex()>=0&&!((list_->GetItemState(event.GetIndex(),wxLIST_STATE_SELECTED))&wxLIST_STATE_SELECTED)){
+            list_->SetItemState(-1,0,wxLIST_STATE_SELECTED);wxui::selectRow(*list_,event.GetIndex());
+        }
+        wxMenu menu;contextMember_.reset();memberChoices_.clear();
+        const auto selected=selectedRows();
+        if(memberOpen_.targets&&memberOpen_.open&&selected.size()==1){
+            const auto i=list_->GetItemData(selected.front());
+            if(i<displayRows_.size()) {contextMember_=displayRows_[i];memberChoices_=memberOpen_.targets(displayRows_[i].restype);}
+            for(std::size_t i=0;i<memberChoices_.size()&&i<16;++i)menu.Append(ID_OpenWithFirst+static_cast<int>(i),wxui::toWx(memberChoices_[i].label));
+            if(!memberChoices_.empty())menu.AppendSeparator();
+        }
+        menu.Append(ID_Extract, "Extract selected...");
+        menu.Append(ID_Delete, "Delete selected");
+        menu.AppendSeparator();
+        menu.Append(ID_FilterColumn, "Filter Selected Column...");
+        menu.Append(ID_ClearAllFilters, "Clear All Filters");
+        PopupMenu(&menu);
+    }
+
+    neoerf::ui::MemberOpenHandler memberOpen_;
+    std::optional<ResourceRow> contextMember_;
+    std::vector<neoerf::ui::MemberOpenTarget> memberChoices_;
+    neosettings::AppSettings settings_{kAppName};
+    wxMenu* recentFilesMenu_ = nullptr;
+    wxPanel* panel_ = nullptr;
+    wxMenuItem* darkModeItem_ = nullptr;
+    wxMenuItem* profileJadeItem_ = nullptr;
+    wxMenuItem* profileKotORItem_ = nullptr;
+    wxMenuItem* profileNWNItem_ = nullptr;
+    wxMenuItem* profileNWN2Item_ = nullptr;
+    wxMenuItem* profileWitcherItem_ = nullptr;
+    wxMenuItem* profileDAOItem_ = nullptr;
+    wxMenuItem* profileDA2Item_ = nullptr;
+    wxListCtrl* list_ = nullptr;
+    wxTextCtrl* filePath_ = nullptr;
+    wxTextCtrl* filterText_ = nullptr;
+    wxGauge* gauge_ = nullptr;
+    wxButton* insertButton_ = nullptr;
+    wxButton* extractButton_ = nullptr;
+    wxButton* deleteButton_ = nullptr;
+    wxButton* findButton_ = nullptr;
+    wxFindReplaceDialog* findDialog_ = nullptr;
+    std::unique_ptr<wxFindReplaceData> findData_;
+
+    wxAuiNotebook* documentTabs_ = nullptr;
+    std::vector<DocumentTab> documents_;
+    std::size_t activeDocumentIndex_ = neotabs::npos;
+    bool tabSwitchInProgress_ = false;
+#if defined(__EMSCRIPTEN__)
+    std::unique_ptr<BrowserArchiveSaveRequest> browserArchiveSave_;
+    wxDialog* browserSaveAsDialog_ = nullptr;
+    std::unique_ptr<BrowserResourceImportBatch> browserResourceImport_;
+    wxDialog* browserReplaceDialog_ = nullptr;
+    std::unique_ptr<BrowserResourceDeleteBatch> browserResourceDelete_;
+    wxDialog* browserDeleteDialog_ = nullptr;
+    std::unique_ptr<BrowserPatcherExportRequest> browserPatcherExport_;
+#endif
+    std::vector<ResourceRow> displayRows_;
+    int contextVisualColumn_ = 0;
+    neoview::FontScaleWheelFilter fontScaleWheelFilter_;
+    double fontScale_ = neoview::kDefaultFontScale;
+    bool darkMode_ = false;
+};
+
+bool FileDropTarget::OnDropFiles(wxCoord, wxCoord, const wxArrayString& filenames) {
+    if (frame_ == nullptr) {
+        return false;
+    }
+    std::vector<std::filesystem::path> files;
+    files.reserve(filenames.size());
+    for (const auto& filename : filenames) {
+        files.emplace_back(wxui::toStd(filename));
+    }
+    frame_->insertResources(files);
+    return true;
+}
+
+} // namespace
+namespace neoerf::ui {
+ERFEditorPanel* createEditorPanel(wxWindow* parent,neomodules::Context context) {return new NeoERFPanelImpl(parent,std::move(context));}
+} // namespace neoerf::ui

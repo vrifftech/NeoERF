@@ -3,7 +3,9 @@ cmake_minimum_required(VERSION 3.16)
 if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
+if(NOT NEO_HOSTED_BUILD)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
+endif()
 
 set(NEOSHARED_ROOT "" CACHE PATH
     "Path to the neoshared source repository; defaults to ../neoshared")
@@ -39,7 +41,7 @@ neo_read_version_header(NEOERF_VERSION
     NEOERF_VERSION_STRING)
 project(NeoERFCpp VERSION ${NEOERF_VERSION} LANGUAGES CXX)
 
-if(MSVC)
+if(MSVC AND NOT NEO_HOSTED_BUILD)
     foreach(_neo_runtime_flag_var IN ITEMS
         CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_RELWITHDEBINFO CMAKE_C_FLAGS_MINSIZEREL
         CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_MINSIZEREL)
@@ -50,7 +52,7 @@ if(MSVC)
 endif()
 
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+if(NOT NEO_HOSTED_BUILD AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     string(REPLACE "-O3" "-O2" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}" CACHE STRING "Release compiler flags" FORCE)
 endif()
@@ -60,7 +62,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 function(neo_force_static_msvc_runtime target_name)
-    if(MSVC AND TARGET ${target_name})
+    if(MSVC AND NOT NEO_HOSTED_BUILD AND TARGET ${target_name})
         set_property(TARGET ${target_name} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
         target_compile_options(${target_name} PRIVATE
             $<$<CONFIG:Debug>:/MTd>
@@ -70,7 +72,7 @@ function(neo_force_static_msvc_runtime target_name)
 endfunction()
 
 function(neo_force_static_msvc_runtime_for_directory_targets)
-    if(MSVC)
+    if(MSVC AND NOT NEO_HOSTED_BUILD)
         get_property(_neo_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
         foreach(_neo_target IN LISTS _neo_targets)
             get_target_property(_neo_type ${_neo_target} TYPE)
@@ -85,27 +87,26 @@ include(GNUInstallDirs)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
+set(NEOSHARED_ENABLE_ERF ON CACHE BOOL
+    "Build the NeoShared ERF/MOD/SAV/HAK/NWM/RIM archive core" FORCE)
 if(NOT TARGET neoshared::wx)
     add_subdirectory("${NEOSHARED_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/neoshared" EXCLUDE_FROM_ALL)
 endif()
-
-
-
-find_package(ZLIB REQUIRED)
-
-add_library(neoerf_core
-    src/erf/Archive.cpp
-    src/erf/Utils.cpp
-)
-target_include_directories(neoerf_core PUBLIC src)
-target_compile_features(neoerf_core PUBLIC cxx_std_17)
-target_link_libraries(neoerf_core PUBLIC ZLIB::ZLIB)
-if(MSVC)
-    target_compile_options(neoerf_core PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(neoerf_core PRIVATE -Wall -Wextra -Wpedantic)
+if(NOT TARGET neoshared::erf)
+    message(FATAL_ERROR
+        "NeoERF requires the neoshared::erf target. Configure NeoShared with "
+        "NEOSHARED_ENABLE_ERF=ON before adding NeoERF.")
 endif()
+
+# Preserve NeoERF's historical target and include paths for the GUI, CLI, and
+# patcher while making NeoShared the sole archive implementation.
+add_library(neoerf_core INTERFACE)
+target_include_directories(neoerf_core INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_compile_features(neoerf_core INTERFACE cxx_std_17)
+target_link_libraries(neoerf_core INTERFACE neoshared::erf)
 
 add_library(neoerf_patcher
     src/erf/ErfPatcher.cpp
@@ -137,7 +138,7 @@ option(NEOERF_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while N
 
 
 function(neoerf_link_wx target_name)
-    target_compile_definitions(${target_name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(${target_name} PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 
     set(_wx_targets)
     foreach(_wx_target IN ITEMS wx::core wx::base wx::adv wx::aui wxWidgets::wxWidgets)
@@ -147,21 +148,23 @@ function(neoerf_link_wx target_name)
     endforeach()
 
     if(_wx_targets)
-        target_link_libraries(${target_name} PRIVATE ${_wx_targets})
+        target_link_libraries(${target_name} PUBLIC ${_wx_targets})
     else()
         if(wxWidgets_USE_FILE)
             include(${wxWidgets_USE_FILE})
         endif()
-        target_include_directories(${target_name} SYSTEM PRIVATE ${wxWidgets_INCLUDE_DIRS})
-        target_compile_definitions(${target_name} PRIVATE ${wxWidgets_DEFINITIONS})
-        target_link_libraries(${target_name} PRIVATE ${wxWidgets_LIBRARIES})
+        target_include_directories(${target_name} SYSTEM PUBLIC ${wxWidgets_INCLUDE_DIRS})
+        target_compile_definitions(${target_name} PUBLIC ${wxWidgets_DEFINITIONS})
+        target_link_libraries(${target_name} PUBLIC ${wxWidgets_LIBRARIES})
     endif()
 
     neo_force_static_msvc_runtime(${target_name})
 endfunction()
 
 
-if(NEOERF_BUILD_WX_GUI)
+option(NEOERF_BUILD_WX_MODULE "Build the reusable NeoERF editor panel" OFF)
+
+if(NEOERF_BUILD_WX_GUI OR NEOERF_BUILD_WX_MODULE)
     set(NEOERF_WX_COMPONENTS core base adv aui)
     # vcpkg provides CMake package targets such as wx::core and wx::base.
     # Prefer CONFIG mode on Windows/vcpkg, but keep FindwxWidgets/wx-config as
@@ -190,6 +193,22 @@ if(NEOERF_BUILD_WX_GUI)
     endif()
 
     if(wxWidgets_FOUND OR TARGET wx::core OR TARGET wxWidgets::wxWidgets)
+        file(READ "${NEOSHARED_ROOT}/include/neoshared/erf/Archive.hpp" _archive_api)
+        if(NOT _archive_api MATCHES "read_current_resource")
+            message(FATAL_ERROR "Update NeoShared: NeoERF needs the staged current-resource API")
+        endif()
+        add_library(neoerf_wx STATIC src/wx/EditorPanel.cpp)
+        add_library(neoerf::wx ALIAS neoerf_wx)
+        target_include_directories(neoerf_wx BEFORE PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(neoerf_wx PUBLIC neoerf_core neoerf_patcher neoshared::wx)
+        target_compile_features(neoerf_wx PUBLIC cxx_std_17)
+        neoerf_link_wx(neoerf_wx)
+        if(MSVC)
+            target_compile_options(neoerf_wx PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(neoerf_wx PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        if(NEOERF_BUILD_WX_GUI)
         set(NEOERF_WX_SOURCES src/wx/main.cpp)
         if(WIN32)
             neo_configure_windows_version_resource(
@@ -217,7 +236,7 @@ if(NEOERF_BUILD_WX_GUI)
             SLUG "neoerf"
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.svg"
         )
-        target_link_libraries(NeoERF PRIVATE neoerf_core neoerf_patcher)
+        target_link_libraries(NeoERF PRIVATE neoerf_wx)
         target_include_directories(NeoERF PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/resources
             ${NEOSHARED_ROOT}/include
@@ -247,6 +266,7 @@ if(NEOERF_BUILD_WX_GUI)
                 DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
             )
         endif()
+        endif() # standalone wrapper
     elseif(NEOERF_REQUIRE_WX_GUI)
         message(FATAL_ERROR "wxWidgets was not found, but NEOERF_REQUIRE_WX_GUI is ON. On Windows, install the pinned wxWidgets 3.3.3 overlay with ../neoshared/scripts/install-wxwidgets.ps1 and configure with the vcpkg toolchain. On Debian or Ubuntu, install libwxgtk3.2-dev.")
     else()
