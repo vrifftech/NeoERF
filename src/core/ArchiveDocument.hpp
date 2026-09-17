@@ -1,6 +1,7 @@
 #pragma once
 #include "erf/Archive.hpp"
 #include <neoshared/ResourceDocument.hpp>
+#include <neoshared/PathUtf8.hpp>
 #include <algorithm>
 #include <memory>
 #include <utility>
@@ -23,21 +24,21 @@ public:
     bool detached() const {return detached_;}
     bool needsSave() const {return archive_->dirty()||newDocument_;}
     std::filesystem::path path() const {return detached_?std::filesystem::path{}:archive_->filename();}
-    std::string displayName() const {return archive_->loaded()?archive_->filename().filename().u8string():"Untitled archive";}
+    std::string displayName() const {return archive_->loaded()?neoshared::pathToUtf8(archive_->filename().filename()):"Untitled archive";}
     void open(const std::filesystem::path& path, bool detached=false,
               std::vector<std::filesystem::path> protectedInputs={},
               ResourceNameProfile profile=ResourceNameProfile::KotOR) {
-        if(!isArchiveExtension(path.extension().u8string()))throw ErfError("Choose an ERF/RIM-family archive.");
+        if(!isArchiveExtension(neoshared::pathToUtf8(path.extension())))throw ErfError("Choose an ERF/RIM-family archive.");
         const auto absolute=std::filesystem::weakly_canonical(std::filesystem::absolute(path));
         auto candidate=std::make_unique<ErfArchive>();candidate->set_resource_type_profile(profile);candidate->load(absolute);
         candidate->release_input_handle(); // no permanent Windows source lock while editing
-        archive_=std::move(candidate);identity_="archive:"+absolute.generic_u8string();description_=absolute.u8string();
+        archive_=std::move(candidate);identity_="archive:"+neoshared::genericPathToUtf8(absolute);description_=neoshared::pathToUtf8(absolute);
         detached_=detached;newDocument_=false;protected_=std::move(protectedInputs);
         if(detached_)protected_.push_back(absolute);
     }
     void openResource(neoshared::ResourceDocument input, ResourceNameProfile profile=ResourceNameProfile::KotOR) {
-        if(!isArchiveExtension(std::filesystem::path(input.fileName).extension().u8string()))throw ErfError("Not an archive resource.");
-        if(input.identity.empty()||std::filesystem::path(input.fileName).filename().u8string()!=input.fileName)
+        if(!isArchiveExtension(neoshared::pathToUtf8(neoshared::pathFromUtf8(input.fileName).extension())))throw ErfError("Not an archive resource.");
+        if(input.identity.empty()||neoshared::pathToUtf8(neoshared::pathFromUtf8(input.fileName).filename())!=input.fileName)
             throw ErfError("Archive snapshot requires a stable identity and a leaf filename.");
         auto bytes=std::make_shared<const std::vector<std::uint8_t>>(std::move(input.bytes));
         auto candidate=std::make_unique<ErfArchive>();candidate->set_resource_type_profile(profile);
@@ -49,10 +50,10 @@ public:
         protected_=std::move(input.protectedInputs);detached_=true;newDocument_=false;
     }
     void create(const std::filesystem::path& path,ArchiveType type,ResourceNameProfile profile=ResourceNameProfile::KotOR) {
-        if(path.empty()||!isArchiveExtension(path.extension().u8string()))throw ErfError("Choose a supported archive filename.");
+        if(path.empty()||!isArchiveExtension(neoshared::pathToUtf8(path.extension())))throw ErfError("Choose a supported archive filename.");
         auto candidate=std::make_unique<ErfArchive>();candidate->set_resource_type_profile(profile);
         candidate->new_archive(std::filesystem::absolute(path).lexically_normal(),type);
-        archive_=std::move(candidate);identity_="archive:"+archive_->filename().generic_u8string();description_.clear();protected_.clear();detached_=false;newDocument_=true;
+        archive_=std::move(candidate);identity_="archive:"+neoshared::genericPathToUtf8(archive_->filename());description_.clear();protected_.clear();detached_=false;newDocument_=true;
     }
     void protectSource(std::vector<std::filesystem::path> inputs) {
         bool sourceIsCurrent=false;
@@ -72,7 +73,7 @@ public:
         if(!archive_->loaded())throw ErfError("No archive loaded.");
         if(requested.empty()&&detached_)throw ErfError("This game/archive snapshot requires Save As to a separate working archive.");
         const auto output=requested.empty()?archive_->filename():requested;
-        if(!isArchiveExtension(output.extension().u8string()))throw ErfError("Choose a supported archive extension.");
+        if(!isArchiveExtension(neoshared::pathToUtf8(output.extension())))throw ErfError("Choose a supported archive extension.");
         checkOutput(output);
         archive_->save(output); // explicit path also commits a newly created empty archive
         archive_->release_input_handle();detached_=false;newDocument_=false;
@@ -83,8 +84,8 @@ public:
     neoshared::ResourceDocument member(const std::string& name,std::uint16_t type) {
         neoshared::ResourceDocument result;
         result.identity=identity_+"/member/"+std::to_string(type)+"/"+ascii_lower(name);
-        result.fileName=std::filesystem::path(name).filename().u8string();result.type=type;
-        result.sourceDescription=(description_.empty()?archive_->filename().u8string():description_)+" : "+name;
+        result.fileName=neoshared::pathToUtf8(neoshared::pathFromUtf8(name).filename());result.type=type;
+        result.sourceDescription=(description_.empty()?neoshared::pathToUtf8(archive_->filename()):description_)+" : "+name;
         result.bytes=archive_->read_current_resource(name);result.protectedInputs=protected_;
         if(!archive_->filename().empty()&&!detached_)result.protectedInputs.push_back(archive_->filename());
         const auto staged=archive_->staged_input_paths();result.protectedInputs.insert(result.protectedInputs.end(),staged.begin(),staged.end());

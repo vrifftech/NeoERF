@@ -8,6 +8,7 @@
 #include "NeoSettings.hpp"
 #include "NeoPatcherExport.hpp"
 #include "NeoViewState.hpp"
+#include <neoshared/PathUtf8.hpp>
 
 
 #include <wx/aui/auibook.h>
@@ -452,7 +453,7 @@ public:
     bool openFile(const std::filesystem::path& path) override {return openArchive(path);}
     bool openGameArchive(const std::filesystem::path& path,std::vector<std::filesystem::path> inputs) override {
         const auto canonical=std::filesystem::weakly_canonical(std::filesystem::absolute(path));
-        if(activateResource("archive:"+canonical.generic_u8string())) {
+        if(activateResource("archive:"+neoshared::genericPathToUtf8(canonical))) {
             inputs.push_back(canonical);activeDocument().model.protectSource(std::move(inputs));refreshActiveDocument();return true;
         }
         neoerf::ArchiveDocument candidate;candidate.open(path,true,std::move(inputs),profile());
@@ -490,7 +491,7 @@ public:
         // Open of a previously saved working path must not duplicate its source tab.
         for(std::size_t i=0;i<documents_.size();++i)
             if(neoshared::sameResourcePath(documents_[i].model.path(),canonical)) {selectDocumentTab(i);return true;}
-        if(activateResource("archive:"+canonical.generic_u8string()))return true;
+        if(activateResource("archive:"+neoshared::genericPathToUtf8(canonical)))return true;
         neoerf::ArchiveDocument candidate;candidate.open(canonical,false,{},requestedProfile.value_or(profile()));
         installDocument(std::move(candidate));rememberRecentFile(canonical);neogames::resolver().inferFromOpenedPath(canonical);return true;
     }
@@ -2780,7 +2781,7 @@ void onCopyCells(wxCommandEvent&) {
                 const auto& row = displayRows_[static_cast<std::size_t>(data)];
                 const auto out = *directory / std::filesystem::path(row.filename()).filename();
                 checkDestination(out,true);
-                if(std::filesystem::exists(out)&&!wxui::confirm(this,"Replace extracted resource", "Replace " + out.u8string() + "?")) continue;
+                if(std::filesystem::exists(out)&&!wxui::confirm(this,"Replace extracted resource", "Replace " + neoshared::pathToUtf8(out) + "?")) continue;
                 activeDocument().model.extract(row.filename(),out);
                 ++extracted;
             }
