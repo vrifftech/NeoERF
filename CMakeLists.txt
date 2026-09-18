@@ -99,6 +99,12 @@ endif()
 option(NEOERF_BUILD_CLI "Build the portable CLI validation harness" ON)
 if(NEOERF_BUILD_CLI)
     add_executable(neoerf_cli src/cli/main.cpp)
+    neo_add_windows_version_resource(neoerf_cli
+        VERSION "${PROJECT_VERSION}"
+        PRODUCT_NAME "NeoERF"
+        FILE_DESCRIPTION "NeoERF command-line ERF/RIM archive editor"
+        INTERNAL_NAME "neoerf_cli"
+        ORIGINAL_FILENAME "neoerf_cli.exe")
     target_link_libraries(neoerf_cli PRIVATE neoerf_core neoerf_patcher)
     if(MSVC)
         target_compile_options(neoerf_cli PRIVATE /W4 /permissive-)
@@ -187,21 +193,19 @@ if(NEOERF_BUILD_WX_GUI OR NEOERF_BUILD_WX_MODULE)
         if(NEOERF_BUILD_WX_GUI)
         set(NEOERF_WX_SOURCES src/wx/main.cpp)
         if(WIN32)
-            neo_configure_windows_version_resource(
-                NEOERF_WX_SOURCES_RC
-                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.rc.in"
-                "neoerf.rc"
-                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.ico")
-            list(APPEND NEOERF_WX_SOURCES "${NEOERF_WX_SOURCES_RC}")
-        endif()
-
-        if(WIN32)
             add_executable(NeoERF WIN32 ${NEOERF_WX_SOURCES})
         elseif(APPLE)
             add_executable(NeoERF MACOSX_BUNDLE ${NEOERF_WX_SOURCES})
         else()
             add_executable(NeoERF ${NEOERF_WX_SOURCES})
         endif()
+        neo_add_windows_version_resource(NeoERF
+            VERSION "${PROJECT_VERSION}"
+            PRODUCT_NAME "NeoERF"
+            FILE_DESCRIPTION "NeoERF ERF/RIM archive editor"
+            INTERNAL_NAME "NeoERF"
+            ORIGINAL_FILENAME "NeoERF.exe"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.ico")
         neo_configure_macos_bundle(NeoERF
             NAME "NeoERF"
             IDENTIFIER "com.vrifftech.neoerf"
