@@ -242,16 +242,13 @@ void extract_archive(const std::vector<std::string>& args, ResourceNameProfile p
 
     const auto active_profile = archive.resource_type_profile();
     if (args.size() == 4) {
-        for (const auto& res : archive.resources()) {
-            const std::string display_name = resource_display_name(res, active_profile);
+        const auto& resources = archive.resources();
+        for (std::size_t index = 0; index < resources.size(); ++index) {
+            const std::string display_name = resource_display_name(resources[index], active_profile);
             const std::string out_name = ascii_lower(display_name);
             const auto out_path = dest / std::filesystem::path(out_name);
             ensure_output_parent_exists(out_path);
-            if (archive.filename_based_resources()) {
-                archive.get_resource_by_name(display_name, out_path);
-            } else {
-                archive.get_resource(res.resref, res.restype, out_path);
-            }
+            archive.get_resource(index, out_path);
         }
     } else {
         for (std::size_t i = 4; i < args.size(); ++i) {

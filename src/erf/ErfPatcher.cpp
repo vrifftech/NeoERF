@@ -305,7 +305,6 @@ void writeArchivePatcherPackageToIni(const ArchivePatcherResult& result,
         ? std::filesystem::current_path()
         : iniPath.parent_path();
     validatePayloadNames(result, iniPath);
-    (void)neotsl::preflightIniMerge(result.project, iniPath, true);
 
     std::error_code ec;
     std::filesystem::create_directories(outputDirectory, ec);
