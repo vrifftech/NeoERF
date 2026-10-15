@@ -98,20 +98,20 @@ endif()
 
 option(NEOERF_BUILD_CLI "Build the portable CLI validation harness" ON)
 if(NEOERF_BUILD_CLI)
-    add_executable(neoerf_cli src/cli/main.cpp)
-    neo_add_windows_version_resource(neoerf_cli
+    add_executable(neoerf-cli src/cli/main.cpp)
+    neo_add_windows_version_resource(neoerf-cli
         VERSION "${PROJECT_VERSION}"
         PRODUCT_NAME "NeoERF"
         FILE_DESCRIPTION "NeoERF command-line ERF/RIM archive editor"
-        INTERNAL_NAME "neoerf_cli"
-        ORIGINAL_FILENAME "neoerf_cli.exe")
-    target_link_libraries(neoerf_cli PRIVATE neoerf_core neoerf_patcher)
+        INTERNAL_NAME "neoerf-cli"
+        ORIGINAL_FILENAME "neoerf-cli.exe")
+    target_link_libraries(neoerf-cli PRIVATE neoerf_core neoerf_patcher)
     if(MSVC)
-        target_compile_options(neoerf_cli PRIVATE /W4 /permissive-)
+        target_compile_options(neoerf-cli PRIVATE /W4 /permissive-)
     else()
-        target_compile_options(neoerf_cli PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(neoerf-cli PRIVATE -Wall -Wextra -Wpedantic)
     endif()
-    install(TARGETS neoerf_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS neoerf-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 
