@@ -58,11 +58,11 @@ namespace {
 
 constexpr const char* kAppName = "NeoERF";
 constexpr const char* kArchiveWildcard =
-    "All supported archives (*.erf;*.rim;*.rimp;*.crf;*.mod;*.sav;*.nwm;*.hak)|*.erf;*.rim;*.rimp;*.crf;*.mod;*.sav;*.nwm;*.hak|"
+    "All supported archives (*.erf;*.rim;*.rimp;*.crf;*.mod;*.mzd;*.sav;*.nwm;*.hak)|*.erf;*.rim;*.rimp;*.crf;*.mod;*.mzd;*.sav;*.nwm;*.hak|"
     "ERF/CRF file (*.erf;*.crf)|*.erf;*.crf|"
     "Resource Image file (*.rim)|*.rim|"
     "Patch resource image file (*.rimp)|*.rimp|"
-    "Module file (*.mod)|*.mod|"
+    "Module file (*.mod;*.mzd)|*.mod;*.mzd|"
     "Savegame file (*.sav)|*.sav|"
     "NWN module file (*.nwm)|*.nwm|"
     "Hak file (*.hak)|*.hak|"

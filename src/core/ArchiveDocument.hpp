@@ -9,7 +9,7 @@
 namespace neoerf {
 inline bool isArchiveExtension(std::string ext) {
     ext=ascii_lower(std::move(ext)); if(!ext.empty()&&ext.front()=='.')ext.erase(ext.begin());
-    return ext=="erf"||ext=="rim"||ext=="rimp"||ext=="crf"||ext=="mod"||ext=="sav"||ext=="nwm"||ext=="hak";
+    return ext=="erf"||ext=="rim"||ext=="rimp"||ext=="crf"||ext=="mod"||ext=="mzd"||ext=="sav"||ext=="nwm"||ext=="hak";
 }
 // Document/provenance only. Parsing, compression, staging, and writing remain in
 // neoshared::erf. A game-browser origin is copy-on-save, never implicit write-back.
