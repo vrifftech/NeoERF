@@ -4,6 +4,11 @@
 
 NeoERF is a ERF/RIM archive editor
 
+
+Support is offered in the OpenKotOR Discord.
+
+[![OpenKotOR Discord](https://discordapp.com/api/guilds/739590575359262792/widget.png?style=banner2)](https://discord.gg/OpenKotOR)
+
 ## Build
 
 This repository consumes shared code from the separate `neoshared` repository. Clone the repositories as siblings:
