@@ -38,10 +38,7 @@ private:
 };
 class NeoERFApp final:public wxApp {
 public:bool OnInit()override {
-    #if wxCHECK_VERSION(3, 3, 0)
-    SetAppearance(Appearance::System);
-#endif
-    SetAppName("NeoERF");SetVendorName("Neo Tools");wxInitAllImageHandlers();
+    SetAppName("NeoERF");SetVendorName("Neo Tools");wxui::initializeTheme("NeoERF");wxInitAllImageHandlers();
     auto* frame=new NeoERFFrame;frame->Show();
     int first=1;
     if(argc>3){const auto option=wxui::toStd(wxString(argv[1]));if(option=="--game"||option=="--profile"){
