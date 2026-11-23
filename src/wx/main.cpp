@@ -1,3 +1,4 @@
+#include "NeoUpdater.hpp"
 #include "ERFEditorPanel.hpp"
 #include "core/Version.hpp"
 #include "neoerf_icon.xpm"
@@ -40,6 +41,10 @@ class NeoERFApp final:public wxApp {
 public:bool OnInit()override {
     SetAppName("NeoERF");SetVendorName("Neo Tools");wxui::initializeTheme("NeoERF");wxInitAllImageHandlers();
     auto* frame=new NeoERFFrame;frame->Show();
+#if !defined(__EMSCRIPTEN__)
+        neoupdate::install(*frame, NEO_UPDATE_APPLICATION, NEO_UPDATE_VERSION);
+#endif
+
     int first=1;
     if(argc>3){const auto option=wxui::toStd(wxString(argv[1]));if(option=="--game"||option=="--profile"){
         const auto value=neoerf::ascii_lower(wxui::toStd(wxString(argv[2])));

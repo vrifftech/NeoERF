@@ -216,6 +216,7 @@ if(NEOERF_BUILD_WX_GUI OR NEOERF_BUILD_WX_MODULE)
             SLUG "neoerf"
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neoerf.svg"
         )
+        neo_enable_updates(NeoERF "NeoERF" "${PROJECT_VERSION}")
         target_link_libraries(NeoERF PRIVATE neoerf_wx)
         target_include_directories(NeoERF PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/resources
