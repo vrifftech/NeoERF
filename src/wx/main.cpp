@@ -41,7 +41,7 @@ class NeoERFApp final:public wxApp {
 public:bool OnInit()override {
     SetAppName("NeoERF");SetVendorName("Neo Tools");wxui::initializeTheme("NeoERF");wxInitAllImageHandlers();
     auto* frame=new NeoERFFrame;frame->Show();
-#if !defined(__EMSCRIPTEN__)
+#if defined(NEO_UPDATE_APPLICATION)
         neoupdate::install(*frame, NEO_UPDATE_APPLICATION, NEO_UPDATE_VERSION);
 #endif
 

@@ -2,7 +2,7 @@
 #include "NeoModulePanel.hpp"
 #include "core/ArchiveDocument.hpp"
 namespace neoerf::ui {
-inline constexpr unsigned kEditorApiVersion=1;
+inline constexpr unsigned kEditorApiVersion=2;
 struct MemberOpenTarget {std::string id,label;};
 struct MemberOpenHandler {
     std::function<std::vector<MemberOpenTarget>(std::uint16_t)> targets;
@@ -22,6 +22,8 @@ public:
     virtual void refreshActiveDocument()=0;
     virtual void selectResourceProfile(ResourceNameProfile profile)=0;
     virtual void insertResources(const std::vector<std::filesystem::path>& files)=0;
+    virtual std::vector<neoshared::ResourceDocument> snapshotMembers()=0;
+    virtual void updateMembers(const std::string& identity,const std::vector<neoshared::ResourceDocument>& resources)=0;
     virtual void setMemberOpenHandler(MemberOpenHandler handler)=0;
     virtual bool openMember(const std::string& name,std::uint16_t type,const std::string& editor={})=0;
 };

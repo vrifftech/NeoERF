@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -474,6 +475,28 @@ public:
         checkDestination(path);
         activeDocument().model.save(path);stagedRows().clear();refreshActiveDocument();
         rememberRecentFile(archive().filename());return true;
+    }
+    std::vector<neoshared::ResourceDocument> snapshotMembers() override {
+        std::vector<neoshared::ResourceDocument> resources;
+        for(const auto& row:canonicalResourceRows())resources.push_back(activeDocument().model.member(row.filename(),row.restype));
+        return resources;
+    }
+    void updateMembers(const std::string& identity,const std::vector<neoshared::ResourceDocument>& resources) override {
+        if(!activateResource(identity))throw std::runtime_error("The parent archive is closed. Save your edits to a separate file or folder, then reopen the resource from its archive.");
+        auto storage=std::make_shared<MemberStorage>();
+        for(const auto& resource:resources) {
+            const auto path=storage->path/neoshared::pathFromUtf8(resource.fileName);
+            std::ofstream output;output.exceptions(std::ios::failbit|std::ios::badbit);
+            output.open(path,std::ios::binary|std::ios::trunc);
+            output.write(reinterpret_cast<const char*>(resource.bytes.data()),resource.bytes.size());output.close();
+        }
+        activeDocument().memberStorage.push_back(storage);
+        try {
+            for(const auto& resource:resources)addResourceFromImportedPath(storage->path/neoshared::pathFromUtf8(resource.fileName),resource.type,
+                extensionNoDot(neoshared::pathFromUtf8(resource.fileName)),resource.bytes.size());
+        } catch(...) {refreshActiveDocument();throw;}
+        refreshActiveDocument();
+        setStatus("Updated resources. Save this archive to write the changes to disk.",activeDocument().model.sourceDescription(),fileCountText());
     }
     void setMemberOpenHandler(neoerf::ui::MemberOpenHandler handler) override {memberOpen_=std::move(handler);}
     bool openMember(const std::string& name,std::uint16_t type,const std::string& editor={}) override {
@@ -1590,7 +1613,15 @@ private:
     }
 #endif
 
+    struct MemberStorage {
+        std::filesystem::path path=neoshared::erf::make_unique_temp_directory(std::filesystem::temp_directory_path(),"NeoERF-members");
+        ~MemberStorage() {
+            std::error_code error;std::filesystem::remove_all(path,error);
+            if(error)wxLogWarning("Unable to remove archive member workspace: %s",wxui::toWx(error.message()));
+        }
+    };
     struct DocumentTab {
+        std::vector<std::shared_ptr<MemberStorage>> memberStorage;
         neoerf::ArchiveDocument model;
         std::vector<ResourceRow> stagedRows;
         neoview::DocumentViewState viewState;
