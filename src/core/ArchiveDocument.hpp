@@ -19,6 +19,8 @@ public:
     ErfArchive& archive() {return *archive_;}
     const ErfArchive& archive() const {return *archive_;}
     const std::string& identity() const {return identity_;}
+    const std::string& sourceIdentity() const {return sourceIdentity_;}
+    void setIdentity(std::string identity) {identity_=std::move(identity);}
     const std::string& sourceDescription() const {return description_;}
     const std::vector<std::filesystem::path>& protectedInputs() const {return protected_;}
     bool detached() const {return detached_;}
@@ -32,7 +34,7 @@ public:
         const auto absolute=std::filesystem::weakly_canonical(std::filesystem::absolute(path));
         auto candidate=std::make_unique<ErfArchive>();candidate->set_resource_type_profile(profile);candidate->load(absolute);
         candidate->release_input_handle(); // no permanent Windows source lock while editing
-        archive_=std::move(candidate);identity_="archive:"+neoshared::genericPathToUtf8(absolute);description_=neoshared::pathToUtf8(absolute);
+        archive_=std::move(candidate);identity_="archive:"+neoshared::genericPathToUtf8(absolute);sourceIdentity_=identity_;description_=neoshared::pathToUtf8(absolute);
         sourcePath_=absolute;module_.clear();detached_=detached;newDocument_=false;protected_=std::move(protectedInputs);
         if(detached_)protected_.push_back(absolute);
     }
@@ -46,7 +48,7 @@ public:
             if(offset>bytes->size()||length>bytes->size()-static_cast<std::size_t>(offset)){error="Archive snapshot read outside payload.";return false;}
             out.assign(bytes->begin()+static_cast<std::ptrdiff_t>(offset),bytes->begin()+static_cast<std::ptrdiff_t>(offset+length));return true;
         });
-        archive_=std::move(candidate);identity_=std::move(input.identity);description_=std::move(input.sourceDescription);
+        archive_=std::move(candidate);sourceIdentity_=input.identity;identity_=std::move(input.identity);description_=std::move(input.sourceDescription);
         sourcePath_=std::move(input.sourcePath);module_=std::move(input.module);protected_=std::move(input.protectedInputs);detached_=true;newDocument_=false;
     }
     void create(const std::filesystem::path& path,ArchiveType type,ResourceNameProfile profile=ResourceNameProfile::KotOR) {
@@ -94,7 +96,7 @@ public:
     }
 private:
     std::unique_ptr<ErfArchive> archive_;
-    std::string identity_,description_,module_;
+    std::string identity_,sourceIdentity_,description_,module_;
     std::filesystem::path sourcePath_;
     std::vector<std::filesystem::path> protected_;
     bool detached_=false,newDocument_=false;

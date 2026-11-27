@@ -454,14 +454,16 @@ public:
     bool openFile(const std::filesystem::path& path) override {return openArchive(path);}
     bool openGameArchive(const std::filesystem::path& path,std::vector<std::filesystem::path> inputs) override {
         const auto canonical=std::filesystem::weakly_canonical(std::filesystem::absolute(path));
-        if(activateResource("archive:"+neoshared::genericPathToUtf8(canonical))) {
-            inputs.push_back(canonical);activeDocument().model.protectSource(std::move(inputs));refreshActiveDocument();return true;
+        for(std::size_t i=0;i<documents_.size();++i)if(neoshared::sameResourcePath(documents_[i].model.path(),canonical)||
+                (documents_[i].model.detached()&&documents_[i].model.sourceIdentity()=="archive:"+neoshared::genericPathToUtf8(canonical))) {
+            selectDocumentTab(i);inputs.push_back(canonical);activeDocument().model.protectSource(std::move(inputs));refreshActiveDocument();return true;
         }
         neoerf::ArchiveDocument candidate;candidate.open(path,true,std::move(inputs),profile());
         installDocument(std::move(candidate));return true;
     }
     bool openResource(neoshared::ResourceDocument resource) override {
-        if(activateResource(resource.identity))return true;
+        for(std::size_t i=0;i<documents_.size();++i)
+            if(documents_[i].model.detached()&&documents_[i].model.sourceIdentity()==resource.identity) {selectDocumentTab(i);return true;}
         neoerf::ArchiveDocument candidate;candidate.openResource(std::move(resource),profile());
         installDocument(std::move(candidate));return true;
     }
@@ -513,8 +515,8 @@ public:
         const auto canonical=std::filesystem::weakly_canonical(std::filesystem::absolute(file));
         // Open of a previously saved working path must not duplicate its source tab.
         for(std::size_t i=0;i<documents_.size();++i)
-            if(neoshared::sameResourcePath(documents_[i].model.path(),canonical)) {selectDocumentTab(i);return true;}
-        if(activateResource("archive:"+neoshared::genericPathToUtf8(canonical)))return true;
+            if(neoshared::sameResourcePath(documents_[i].model.path(),canonical)||
+                (documents_[i].model.detached()&&documents_[i].model.sourceIdentity()=="archive:"+neoshared::genericPathToUtf8(canonical))) {selectDocumentTab(i);return true;}
         neoerf::ArchiveDocument candidate;candidate.open(canonical,false,{},requestedProfile.value_or(profile()));
         installDocument(std::move(candidate));rememberRecentFile(canonical);neogames::resolver().inferFromOpenedPath(canonical);return true;
     }
@@ -534,6 +536,11 @@ public:
 private:
 
     void installDocument(neoerf::ArchiveDocument candidate) {
+        // Child editors keep this handle across Save As. A reopened original
+        // needs a distinct handle while its saved copy remains open.
+        const auto identity=candidate.identity();
+        for(std::size_t suffix=1;std::any_of(documents_.begin(),documents_.end(),[&](const auto& doc){return doc.model.identity()==candidate.identity();});++suffix)
+            candidate.setIdentity(identity+"#"+std::to_string(suffix));
         ensureDocumentTabForOpen();auto& doc=activeDocument();doc.model=std::move(candidate);
         profile()=archive().resource_type_profile();stagedRows().clear();viewState().resetForNewDocument();
         viewState().sortColumn=0;viewState().sortAscending=true;
